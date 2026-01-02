@@ -4,11 +4,50 @@ device: "cuda"
 
 
 dataset:
+    root: "./data"
+    time_step: 4
+
+loader:
+    train:
+        ratio: 0.7
+        batch_size: 1
+        shuffle: True
+    val:
+        ratio: 0.15
+        batch_size: 1
+        shuffle: False
+    test:
+        ratio: 0.15
+        batch_size: 1
+        shuffle: False
 
 model:
-  
+    temporal_data_size: 4
+    GNN:
+        k: 3
+        conv_in:
+            in_channels: 1
+            act_first: True
+        
+        conv_hidden:
+            hidden_channels: 15
+            act: "ReLU"
+            act_first: True
+
+        conv_out:
+            out_channels: 1
+            num_layers: 3
+            act_first: True
+    LSTM:
+        hidden_size: 12
+        num_layers: 1
+        bias: True
+        batch_first: True
+        bidirectional: False
+        proj_size: 0
+    
 train:
-    epochs: 20
+    epochs: 5
     learning_rate: 0.005
     weight_decay: 0.001
     shuffle: True
@@ -16,13 +55,19 @@ train:
     validation_split: 0.1
     test_split: 0.2
 
-    time_steps: 24
-
     scheduler:
         type: "StepLR"
-        step_size: 10
-        gamma: 0.5
+        params:
+            step_size: 10
+            gamma: 0.5
 
-    optimizer: "adam"
-
-
+    optimizer:
+        type: "AdamW"
+        params:
+            lr: 0.005
+            weight_decay: 0.001
+    criterion:
+        type: "MSELoss"
+        params: {}
+test:
+    save_root: "./test_results"
