@@ -9,7 +9,8 @@ if __name__ == "__main__":
     #loader
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
     for batch in loader:
-        print(f"Batch data shape: {batch.x.shape}, Edge index shape: {batch.edge_index.shape}")
+        print(f"Batch data shape: {batch.x.shape}, Edge index shape: {batch.edge_index.shape}, Edge attr shape: {batch.edge_attr.shape},  y shape: {batch.y.shape}, weather shape: {batch.weather.shape}")
         print(f"Batch y shape: {batch.y.shape}")
+        print(f'batch.num_graphs: {batch.num_graphs}')
         print(batch.x[:5, :])
         break  # 첫 번째 배치만 출력

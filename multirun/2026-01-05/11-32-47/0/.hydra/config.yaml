@@ -55,7 +55,6 @@ train:
     params:
       lr: 0.005
       weight_decay: 0.001
-  criterion:
-    max_weight: 30
+  criterion: 30
 test:
   save_root: ./test_results

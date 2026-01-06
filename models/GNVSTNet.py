@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 
 from models.GNN import GNN
+from models.loader.GNVSTDataset import MyGraphDataset
+from torch_geometric.loader import DataLoader
+
 
 class GNVSTNet(nn.Module):
     def __init__(
@@ -26,7 +29,7 @@ class GNVSTNet(nn.Module):
         )
 
         self.temporal_embedding_layer = nn.Linear( #meteorological data를 임베딩하는 선형층
-            in_features=8,
+            in_features=4,  #날씨 피처 개수
             out_features=temporal_data_size
         )
         self.sigmoid = nn.Sigmoid()
@@ -34,26 +37,38 @@ class GNVSTNet(nn.Module):
     def forward(
             self,
             data,
-            temporal_data = None,
             context_data = None
     ):
-        gnn_out = self.gnn(data.x, data.edge_index) # (N, T, gnn_hidden)
-        gnn_out = gnn_out.permute(1, 0, 2)  # LSTM 입력을 위해 (T, N, gnn_hidden)
+        B = data.num_graphs
+        N = data.x.size(0) // B
+        T = data.x.size(1)
+        #그래프 처리
+        x = self.gnn(data)  # [num_nodes*batch, time_step, gnn_out_features]
+
+        #temporal data 처리
+        weather = data.weather  # [time_step*batch, weather_features]
+        weather_embedded = self.temporal_embedding_layer(weather)  # 선형층 통과
+
+        #LSTM 입력 준비
+        weather_embedded = weather_embedded.view(B, T, -1)
+        weather_embedded = weather_embedded[data.batch] # [num_nodes*batch, time_step, weather_embedded_features]
+        # print(weather_embedded.shape)
+
+        lstm_input = torch.cat([x, weather_embedded], dim=-1)  # [num_nodes*batch, time_step, gnn_out + weather_embedded_features]
+        # print(lstm_input.shape)
+
+        _, (out, _) = self.lstm(lstm_input) 
+
+        # print(out.shape)
+        out = self.final_out(out.squeeze(0))  # [num_nodes*batch, 1]
+        return self.sigmoid(out)
+
         
-        temporal_data = temporal_data.to(gnn_out.device) if temporal_data is not None else torch.zeros(gnn_out.size(0), 8).to(gnn_out.device)  # (T, 8)
-        temporal_embedded = self.temporal_embedding_layer(temporal_data)  # (T, temporal_data_size)
-        temporal_embedded = temporal_embedded.unsqueeze(1).expand(-1, gnn_out.size(1), -1)  # (T, N, temporal_data_size)
+        
+        
+        
 
-        lstm_input = torch.cat([gnn_out, temporal_embedded], dim=-1)  # (T, N, gnn_hidden + temporal_data_size)
-        lstm_input = lstm_input.permute(1, 0, 2)  # (N, T, gnn_hidden + temporal_data_size)
-        _, (lstm_out, _) = self.lstm(lstm_input)
-        lstm_out = lstm_out.squeeze(0)  # (N, hidden_size)
-
-        context_data = context_data.to(gnn_out.device) if context_data is not None else torch.zeros(gnn_out.size(1), 0).to(gnn_out.device)  # (N, context_dim)
-        final_input = torch.cat([lstm_out, context_data], dim=-1)  # (N, hidden_size + context_dim)
-        gnn_out = self.final_out(final_input)  # (N, 1)
-        gnn_out = self.sigmoid(gnn_out)  # (N, 1)
-        return gnn_out
+        
 
 
 
