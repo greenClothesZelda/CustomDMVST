@@ -7,44 +7,59 @@ dataset:
 loader:
   train:
     ratio: 0.7
-    batch_size: 50
+    batch_size: 4000
     shuffle: true
   val:
     ratio: 0.15
-    batch_size: 50
+    batch_size: 1000
     shuffle: false
   test:
     ratio: 0.15
-    batch_size: 100
+    batch_size: 1000
     shuffle: false
 model:
   temporal_data_size: ${dataset.time_step}
-  GNN:
+  Cluster_GNN:
     k: 2
     conv_in:
       act_first: true
     conv_hidden:
-      hidden_channels: 7
-      act: ReLU
+      hidden_channels: 8
+      act: GELU
       act_first: true
     conv_out:
-      out_channels: 4
+      out_channels: 5
+      num_layers: 2
+      act_first: true
+      
+  Node_GNN:
+    k: 3
+    conv_in:
+      act_first: true
+    conv_hidden:
+      hidden_channels: 8
+      act: GELU
+      act_first: true
+    conv_out:
+      out_channels: 5
       num_layers: 3
       act_first: true
   LSTM:
-    hidden_size: 12
+    hidden_size: 8
     num_layers: 1
     bias: true
     batch_first: true
     bidirectional: false
     proj_size: 0
 train:
-  epochs: 50
+  epochs: 100
   learning_rate: 0.005
   weight_decay: 0.001
   shuffle: true
   validation_split: 0.1
   test_split: 0.2
+  alpha: 0.1
+  patience: 5
   scheduler:
     type: StepLR
     params:
@@ -56,6 +71,7 @@ train:
       lr: 0.005
       weight_decay: 0.001
   criterion:
-    max_weight: 30
+    node_max_weight: 30
+    cluster_max_weight: 50
 test:
   save_root: ./test_results
