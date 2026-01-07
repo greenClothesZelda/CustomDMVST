@@ -51,7 +51,7 @@ def validate(model, loader, device, criterion_cluster, criterion_node, alpha):
     return avg_loss
 
 
-def train(model, train_loader, val_loader, device, optimizer, criterion_cluster, criterion_node, scheduler, epochs, alpha, patience=10):
+def train(model, train_loader, val_loader, device, optimizer, criterion_cluster, criterion_node, scheduler, epochs, alpha, patience=10, min_delta=1e-3):
     train_losses = []
     val_losses = []
 
@@ -65,32 +65,37 @@ def train(model, train_loader, val_loader, device, optimizer, criterion_cluster,
             model, train_loader, device, optimizer, criterion_cluster, criterion_node, alpha, scheduler)
         val_loss = validate(model, val_loader, device,
                             criterion_cluster, criterion_node, alpha)
+        
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        
         if scheduler is not None:
             scheduler.step()
 
-        if val_loss < best_val_loss:
+        # 개선 여부 확인 (min_delta 적용)
+        # 이전 최고 기록보다 min_delta 이상으로 줄어들었을 때만 개선으로 인정
+        if val_loss < best_val_loss - min_delta:
             best_val_loss = val_loss
             best_model_state = copy.deepcopy(model.state_dict())
+            wait = 0  # 개선되었으므로 대기 카운트 초기화
             log.info(
                 f"New best model found at epoch {epoch+1} with val loss {val_loss:.4f}")
+        else:
+            wait += 1
+            log.info(f"EarlyStopping counter: {wait} out of {patience}")
 
         log.info(
             f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        # break
 
-        # 조기종료
-        if epoch > 10 and val_loss > best_val_loss:
-            wait += 1
-            if wait >= patience:
-                log.info(f'Early stopping at epoch {epoch+1}')
-                break
-        else:
-            wait = 0
+        # 조기 종료 체크
+        if wait >= patience:
+            log.info(f'Early stopping at epoch {epoch+1} due to insufficient improvement.')
+            break
+
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
         log.info(f'Best model state loaded loss: {best_val_loss:.4f}')
+        
     return train_losses, val_losses
 
 

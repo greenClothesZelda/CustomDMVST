@@ -42,7 +42,7 @@ class GNVSTNet(nn.Module):
         )
 
         self.node_final_out = nn.Linear(
-            LSTM_configs['hidden_size']+context_dim,
+            LSTM_configs['hidden_size']+context_dim ,
             1
         )
 
@@ -65,14 +65,10 @@ class GNVSTNet(nn.Module):
         # 그래프 처리
         # [num_nodes*batch, time_step, gnn_out_features]
         x = self.node_gnn(node_data) # [num_nodes*batch, time_step, gnn_out_features]
-        # print(f'x shape after node GNN: {x.shape}')
-        # print(f'cluster_data.x shape: {cluster_data.x.shape}')
-        # print(f'assignment_matrix shape: {self.assignment_matrix.shape}')
 
         node_x = x.view(B, T, N, -1)
         cluster_sum = torch.einsum('n c, b t n f -> b t c f',
                                    self.assignment_matrix, node_x)
-        # print(f'cluster_sum shape: {cluster_sum.shape}')
         node_count = self.assignment_matrix.sum(dim=0)  # [num_clusters]
         node_count = torch.clamp(node_count, min=1e-9)
 
@@ -81,9 +77,7 @@ class GNVSTNet(nn.Module):
         cluster_mean = cluster_mean.permute(0, 2, 1, 3).contiguous().view(-1, T, cluster_mean.size(-1))
         # print(f'cluster_mean shape: {cluster_mean.shape}')
         cluster_data.x = torch.cat([cluster_data.x, cluster_mean], dim=-1)
-        # print(f'cluster_data.x shape after concat: {cluster_data.x.shape}')
         cluster_out = self.cluster_gnn(cluster_data)
-        # print(f'cluster_out shape: {cluster_out.shape}')
 
         # temporal data 처리
         weather = node_data.weather  # [time_step*batch, weather_features]
@@ -112,22 +106,19 @@ class GNVSTNet(nn.Module):
         cluster_lstm_out = cluster_lstm_out.view(B, C, -1)
         node_lstm_out = node_lstm_out.view(B, N, -1)
 
-        #cluster -> node로 매핑
-        node_lstm_out = torch.einsum('n c, b c f -> b n f',
-                                     self.assignment_matrix, cluster_lstm_out)
-        cluster_count = self.assignment_matrix.sum(dim=1)  # [num_nodes]
-        cluster_count = torch.clamp(cluster_count, min=1e-9)
-        node_lstm_out = node_lstm_out / cluster_count.unsqueeze(0).unsqueeze(-1)
-        node_lstm_out = node_lstm_out.reshape(B, N, -1)
+        # #cluster -> node로 매핑
+        # cluster2node = torch.einsum('n c, b c f -> b n f',
+        #                              self.assignment_matrix, cluster_lstm_out)
+        # cluster_count = self.assignment_matrix.sum(dim=1)  # [num_nodes]
+        # cluster_count = torch.clamp(cluster_count, min=1e-9)
+        # cluster2node = cluster2node / cluster_count.unsqueeze(0).unsqueeze(-1)
+        # # print(f'cluster2node shape: {cluster2node.shape}')
+        # # print(f'node_lstm_out shape before concat: {node_lstm_out.shape}')
+        # node_lstm_out = torch.cat([node_lstm_out, cluster2node], dim=-1)
+        # # print(f'node_lstm_out shape after concat: {node_lstm_out.shape}')
 
-        # print(f'node_lstm_out shape after mapping: {node_lstm_out.shape}'
-        #       , f'cluster_lstm_out shape: {cluster_lstm_out.shape}')
-
-        # print(f'cluster_lstm_out shape before final: {cluster_lstm_out.shape}')
         cluster_final = self.cluster_final_out(cluster_lstm_out) 
         node_final = self.node_final_out(
             node_lstm_out
         )
-        # print(f'cluster_final shape: {cluster_final.shape}')
-        # print(f'node_lstm_out shape before final: {node_lstm_out.shape}')
         return self.sigmoid(cluster_final), self.sigmoid(node_final)  # 0~1사이 값 반환
