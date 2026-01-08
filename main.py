@@ -148,7 +148,7 @@ def run(config):
         test_loader=test_loader,
         device=device,
         save_root=out_put_dir,
-        max_demand=dataset.cluster_dataset.max_demand,
+        max_demand=dataset.node_dataset.max_demand,
         coverage=dataset.node_dataset.coverage
     )
 

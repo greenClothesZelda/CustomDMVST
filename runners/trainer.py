@@ -51,7 +51,7 @@ def validate(model, loader, device, criterion_cluster, criterion_node, alpha):
     return avg_loss
 
 
-def train(model, train_loader, val_loader, device, optimizer, criterion_cluster, criterion_node, scheduler, epochs, alpha, patience=10, min_delta=1e-3):
+def train(model, train_loader, val_loader, device, optimizer, criterion_cluster, criterion_node, scheduler, epochs, alpha, patience=10, min_delta=1e-4):
     train_losses = []
     val_losses = []
 
@@ -119,7 +119,7 @@ def test(model, test_loader, device, save_root, max_demand, coverage=None):
         total_loss += loss.item() * node_data.y.size(0)
         total_samples += node_data.y.size(0)
         # break  # 디버깅용: 한 배치만 처리
-    avg_loss = total_loss / total_samples * max_demand
+    avg_loss = total_loss / total_samples * max_demand / 100
     covered_loss = avg_loss
 
     if coverage:
@@ -128,8 +128,7 @@ def test(model, test_loader, device, save_root, max_demand, coverage=None):
             f"Coverage applied: {coverage}, Covered Test Loss: {covered_loss:.4f}")
     else:
         log.info("No coverage information provided.")
-    all_outputs = np.round(
-        torch.cat(all_outputs, dim=0).squeeze().numpy() * max_demand)
+    all_outputs = torch.cat(all_outputs, dim=0).squeeze().numpy() * max_demand
     all_targets = torch.cat(all_targets, dim=0).squeeze().numpy() * max_demand
 
     # print(f'All outputs shape: {all_outputs.shape}, All targets shape: {all_targets.shape}')
