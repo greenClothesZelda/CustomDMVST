@@ -1,4 +1,6 @@
 import torch
+import torch.nn.functional as F
+
 import hydra
 from hydra.core.hydra_config import HydraConfig
 import logging
@@ -63,7 +65,25 @@ class WeightedMAELoss(nn.Module):
         loss = weighted_mae.sum() / weights.sum()
 
         return loss
+    
+class DistributionLoss(nn.Module):
+    def __init__(self, assignment_matrix, device):
+        super().__init__()
+        self.assignment_matrix = assignment_matrix.to(device).unsqueeze(0) # [1, num_nodes, num_clusters]
+        self.num_clusters = assignment_matrix.size(1)
+        self.num_nodes = assignment_matrix.size(0)
+        self.CSE = nn.CrossEntropyLoss()
 
+    def forward(self, pred, target): #pred, target: [B, num_nodes]
+        pred = pred.unsqueeze(-1) # [B, num_nodes, 1]
+        target = target.unsqueeze(-1) # [B, num_nodes, 1]
+        assignment_matrix = self.assignment_matrix.expand(pred.size(0), -1, -1) # [B, num_nodes, num_clusters]
+
+        pred_distribution = (assignment_matrix * pred).permute(0, 2, 1) # [B, num_clusters, num_nodes]
+        target_distribution = (assignment_matrix * target).permute(0, 2, 1) # [B, num_clusters, num_nodes]
+
+        loss = self.CSE(pred_distribution, target_distribution)
+        return loss
 
 @hydra.main(config_path="configs", version_base=None)
 def run(config):
@@ -123,10 +143,9 @@ def run(config):
             max_demand=dataset.cluster_dataset.max_demand,
             max_weight=train_cfg.criterion.cluster_max_weight
         ),
-        criterion_node=WeightedMAELoss(
-            count_data=dataset.node_dataset.count_data,
-            max_demand=dataset.node_dataset.max_demand,
-            max_weight=train_cfg.criterion.node_max_weight
+        criterion_node=DistributionLoss(
+            assignment_matrix=dataset.assignment_matrix,
+            device=device
         ),
         scheduler=getattr(torch.optim.lr_scheduler, train_cfg.scheduler.type)(
             getattr(torch.optim, train_cfg.optimizer.type)(
@@ -143,13 +162,14 @@ def run(config):
     out_put_dir = HydraConfig.get().runtime.output_dir  # 모델 저장할 때 사용
 
     # 테스트 시작
-    test_loss, covered_loss = test(
+    test_loss, origin_loss= test(
         model=model,
         test_loader=test_loader,
         device=device,
         save_root=out_put_dir,
         max_demand=dataset.node_dataset.max_demand,
-        coverage=dataset.node_dataset.coverage
+        dropped_point=dataset.node_dataset.dropped_point,
+        assignment_matrix=dataset.assignment_matrix
     )
 
     model_path = f"{out_put_dir}/final_model.pth"
@@ -160,7 +180,7 @@ def run(config):
         # "train_loss": train_losses[-1],
         # "val_loss": val_losses[-1],
         # "test_loss": test_loss,
-        "covered_loss": covered_loss,
+        "origin_loss": origin_loss,
         # "epochs": config.train.epochs
     }
     results.append(metric)

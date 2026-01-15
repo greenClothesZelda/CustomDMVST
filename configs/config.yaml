@@ -52,13 +52,13 @@ model:
     bidirectional: false
     proj_size: 0
 train:
-  epochs: 20
+  epochs: 50
   learning_rate: 0.005
   weight_decay: 0.001
   shuffle: true
   validation_split: 0.1
   test_split: 0.2
-  alpha: 0.2
+  alpha: 0.3
   patience: 3
   scheduler:
     type: StepLR

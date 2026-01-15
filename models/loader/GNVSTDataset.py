@@ -26,7 +26,7 @@ class MyGraphDataset(InMemoryDataset):
         stats = torch.load(self.processed_paths[1])
         self.max_demand = stats['max_demand']
         self.count_data = stats['count_data']
-        self.coverage = stats['coverage']
+        self.dropped_point = stats['dropped_point']
         log.info(f"Max demand: {self.max_demand}"
                  f", Count data sample: {list(self.count_data.items())}")
 
@@ -114,8 +114,7 @@ class MyGraphDataset(InMemoryDataset):
         data, slices = self.collate(data_list)
 
         torch.save((data, slices), self.processed_paths[0])
-        torch.save({'max_demand': max_demand, 'count_data': count_data,
-                   'coverage': json_data['meta']['coverage']}, self.processed_paths[1])
+        torch.save({'max_demand': max_demand, 'count_data': count_data, 'dropped_point': json_data['meta']['dropped_points']}, self.processed_paths[1])
 
     def inverse_transform(self, scaled_val):
         """테스트 시 예측값을 실제 수요로 복원"""

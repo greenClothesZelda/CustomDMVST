@@ -42,7 +42,7 @@ class GNVSTNet(nn.Module):
         )
 
         self.node_final_out = nn.Linear(
-            LSTM_configs['hidden_size']+context_dim ,
+            LSTM_configs['hidden_size']*2+context_dim ,
             1
         )
 
@@ -106,19 +106,19 @@ class GNVSTNet(nn.Module):
         cluster_lstm_out = cluster_lstm_out.view(B, C, -1)
         node_lstm_out = node_lstm_out.view(B, N, -1)
 
-        # #cluster -> node로 매핑
-        # cluster2node = torch.einsum('n c, b c f -> b n f',
-        #                              self.assignment_matrix, cluster_lstm_out)
-        # cluster_count = self.assignment_matrix.sum(dim=1)  # [num_nodes]
-        # cluster_count = torch.clamp(cluster_count, min=1e-9)
-        # cluster2node = cluster2node / cluster_count.unsqueeze(0).unsqueeze(-1)
-        # # print(f'cluster2node shape: {cluster2node.shape}')
-        # # print(f'node_lstm_out shape before concat: {node_lstm_out.shape}')
-        # node_lstm_out = torch.cat([node_lstm_out, cluster2node], dim=-1)
-        # # print(f'node_lstm_out shape after concat: {node_lstm_out.shape}')
+        #cluster -> node로 매핑
+        cluster2node = torch.einsum('n c, b c f -> b n f',
+                                     self.assignment_matrix, cluster_lstm_out)
+        cluster_count = self.assignment_matrix.sum(dim=1)  # [num_nodes]
+        cluster_count = torch.clamp(cluster_count, min=1e-9)
+        cluster2node = cluster2node / cluster_count.unsqueeze(0).unsqueeze(-1)
+        # print(f'cluster2node shape: {cluster2node.shape}')
+        # print(f'node_lstm_out shape before concat: {node_lstm_out.shape}')
+        node_lstm_out = torch.cat([node_lstm_out, cluster2node], dim=-1)
+        # print(f'node_lstm_out shape after concat: {node_lstm_out.shape}')
 
         cluster_final = self.cluster_final_out(cluster_lstm_out) 
         node_final = self.node_final_out(
             node_lstm_out
         )
-        return self.sigmoid(cluster_final), self.sigmoid(node_final)  # 0~1사이 값 반환
+        return self.sigmoid(cluster_final), node_final  # 0~1사이 값 반환
