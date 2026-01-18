@@ -16,7 +16,7 @@ def train_one_epoch(model, loader, device, optimizer, criterion_cluster, criteri
         node_data = node_data.to(device)
         cluster_data = cluster_data.to(device)
         optimizer.zero_grad()
-        cluster_out, node_out, masking = model(
+        cluster_out, node_out = model(
             node_data=node_data, cluster_data=cluster_data, context_data=None)
         # print(f'cluster_out shape: {cluster_out.shape}, cluster_data.y shape: {cluster_data.y.shape}')
         # print(f'node_out shape: {node_out.shape}, node_data.y shape: {node_data.y.shape}')
@@ -42,7 +42,7 @@ def validate(model, loader, device, criterion_cluster, criterion_node, alpha):
     for (node_data, cluster_data) in loader:
         node_data = node_data.to(device)
         cluster_data = cluster_data.to(device)
-        cluster_out, node_out, masking = model(
+        cluster_out, node_out = model(
             node_data, cluster_data, context_data=None)
         loss_cluster = criterion_cluster(
             cluster_out.reshape(-1, 1), cluster_data.y.view(-1, 1).to(device))
@@ -118,12 +118,12 @@ def test(model, test_loader, device, save_root, max_demand, assignment_matrix, d
     for (node_data, cluster_data) in test_loader:
         node_data = node_data.to(device)
         cluster_data = cluster_data.to(device)
-        cluster_out, node_out, masking = model(
+        cluster_out, node_out = model(
             node_data, cluster_data, context_data=None)
         B = node_data.num_graphs
         node_out = node_out.reshape(B, -1)
         node_distribution = F.softmax((assignment_matrix.unsqueeze(0) * node_out.unsqueeze(-1)).permute(0, 2, 1), dim=-1)  # [B, num_clusters, num_nodes]
-        cluster_y = cluster_data.y.view(B, -1)
+        cluster_y = cluster_out.view(B, -1)
 
         node_allocations = torch.sum(assignment_matrix, dim=1)  # [num_clusters]
         node_allocations = torch.clamp(node_allocations, min=1e-9)
