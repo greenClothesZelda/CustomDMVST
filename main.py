@@ -1,174 +1,82 @@
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Subset
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
 import logging
+from pathlib import Path
 
-from models.GNVSTNet import GNVSTNet
-from models.loader.GNVSTDataset import MyGraphDataset
-from torch_geometric.loader import DataLoader
-from runners.trainer import *
+from transformers import Trainer, TrainingArguments, EarlyStoppingCallback
+
+from models.GNVSTNet import *
+from models.loader.DemandDataset import MyDataset
 from omegaconf import OmegaConf
 
+from runners.test import test_loop
 
 log = logging.getLogger(__name__)
 results = []  # multi run시 결과 한눈에 보기 위해 사용
 
-
-class WeightedMAELoss(nn.Module):
-    def __init__(self, count_data, max_demand, max_weight=30):
-        super().__init__()
-        self.max_demand = max_demand
-        self.max_weight = max_weight
-
-        # 전체 데이터 개수
-        total_count = sum(count_data.values())
-
-        # 각 값에 대한 가중치 계산: 100 / (해당 값의 비율 * 100)
-        self.weights = {}
-        for val, count in count_data.items():
-            percentage = (count / total_count) * 100
-            weight = min(100 / percentage, max_weight)  # 상한 100
-            self.weights[val] = weight
-
-        log.info(
-            f"WeightedMAELoss initialized with {len(self.weights)} weight classes")
-        log.info(f"Sample weights: {dict(list(self.weights.items())[:10])}")
-
-    def forward(self, pred, target):
-        """
-        pred: [batch_size, 1] - 정규화된 예측값
-        target: [batch_size, 1] - 정규화된 실제값
-        """
-        # 원래 스케일로 복원
-        pred_orig = (pred * self.max_demand).clamp(min=0)
-        target_orig = (target * self.max_demand).clamp(min=0)
-
-        # 타겟의 정수값으로 가중치 가져오기
-        target_int = torch.round(target_orig).long().squeeze()
-
-        # 각 샘플의 가중치 가져오기
-        weights = torch.tensor([
-            self.weights.get(int(t.item()), self.max_weight)
-            for t in target_int
-        ], device=pred.device, dtype=torch.float)
-
-        mae = torch.abs(pred_orig - target_orig).squeeze()
-
-        # 가중 MSE
-        weighted_mae = mae * weights
-
-        # 가중 평균
-        loss = weighted_mae.sum() / weights.sum()
-
-        return loss
-
+def set_seed(seed):
+    import numpy as np
+    import random
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # 멀티 GPU 사용 시
+    np.random.seed(seed)
+    random.seed(seed)
+    # 결정론적 연산을 위한 설정 (필요 시)
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
 
 @hydra.main(config_path="configs", version_base=None)
 def run(config):
+    set_seed(config.seed)
     device = torch.device(config.device)
     log.info(f"Using device: {device}")
-    dataset_cfg = config.dataset  # 모델에 입력하는 방법은 unpacking(**)사용
-    model_cfg = config.model
-    train_cfg = config.train
 
-    OmegaConf.set_struct(model_cfg, False)
+    output_dir = HydraConfig.get().runtime.output_dir
 
     # 데이터셋 및 데이터로더 설정
-    dataset = MyGraphDataset(
-        root=dataset_cfg.root,
-        time_step=dataset_cfg.time_step
+    dataset = MyDataset(
+        root=Path(config.dataset.root),
+        time_step=config.dataset.time_step,
+    )
+    len_dataset = len(dataset)
+    IR_dataset_size = int(len_dataset * config.split.ir_ratio)
+    Train_dataset_size = int(len_dataset * config.split.train_ratio)
+
+    indices = list(range(len_dataset))
+    
+    IR_dataset = Subset(dataset, indices[:IR_dataset_size])
+    Train_dataset = Subset(dataset, indices[IR_dataset_size:IR_dataset_size + Train_dataset_size])
+    Test_dataset = Subset(dataset, indices[IR_dataset_size + Train_dataset_size:])
+    log.info(f"Dataset sizes - IR: {len(IR_dataset)}, Train: {len(Train_dataset)}, Test: {len(Test_dataset)}")
+    
+    ir_module = IRModule(IR_dataset)
+    model = IRVSTNet(ir_module=ir_module, **config.model['IRVSTNet'])
+    trainer_model = ModelTrainer(model).to(device)
+
+    args = TrainingArguments(
+        **config['train'],
+        output_dir=output_dir,
+        report_to=[],
+        log_level='info'
     )
 
-    model_cfg['Node_GNN']['conv_in']['in_channels'] = dataset.num_node_features
-
-    train_size = int(len(dataset) * config.loader.train.ratio)
-    val_size = int(len(dataset) * config.loader.val.ratio)
-    test_size = len(dataset) - train_size - val_size
-
-    train_dataset = dataset[:train_size]
-    val_dataset = dataset[train_size:train_size + val_size]
-    test_dataset = dataset[train_size + val_size:]
-
-    train_loader = DataLoader(
-        train_dataset, batch_size=config.loader.train.batch_size, shuffle=config.loader.train.shuffle)
-    val_loader = DataLoader(
-        val_dataset, batch_size=config.loader.val.batch_size, shuffle=config.loader.val.shuffle)
-    test_loader = DataLoader(
-        test_dataset, batch_size=config.loader.test.batch_size, shuffle=config.loader.test.shuffle)
-    # 로더 설정 끝
-
-    # 모델 초기화
-    model = GNVSTNet(
-        context_dim=0,
-        temporal_data_size=model_cfg.temporal_data_size,
-        Node_GNN_configs=model_cfg.Node_GNN,
-        Node_LSTM_configs=model_cfg.Node_LSTM,
-        aggregated_LSTM_configs=model_cfg.Aggregated_LSTM,
-        Meteorological_configs=model_cfg.Meteorological,
-        device=device
-    ).to(device)
-
-    out_put_dir = HydraConfig.get().runtime.output_dir  # 모델 저장할 때 사용
-
-    _, initial_test_loss = test(
-        model=model,
-        test_loader=test_loader,
-        device=device,
-        save_root='./temp',
-        max_demand=dataset.max_demand,
-        dropped_point=dataset.dropped_point,
-        assignment_matrix=None
+    trainer = Trainer(
+        model=trainer_model,
+        args=args,
+        train_dataset=Train_dataset,
+        eval_dataset=Test_dataset,
+        data_collator=collate_fn,
+        callbacks=[EarlyStoppingCallback(**config.callbacks.early_stopping)]
     )
-    log.info(f'Initial test loss before training: {initial_test_loss:.4f}')
-
-    # 훈련 시작
-    train_losses, val_losses = train(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        optimizer=getattr(torch.optim, train_cfg.optimizer.type)(
-            model.parameters(), **train_cfg.optimizer.params),
-        criterion_cluster=nn.L1Loss(),
-        criterion_node=nn.L1Loss(),
-        scheduler=getattr(torch.optim.lr_scheduler, train_cfg.scheduler.type)(
-            getattr(torch.optim, train_cfg.optimizer.type)(
-                model.parameters(),
-                **train_cfg.optimizer.params
-            ),
-            **train_cfg.scheduler.params
-        ),
-        epochs=train_cfg.epochs,
-        alpha=train_cfg.alpha,
-        patience=train_cfg.patience
-    )
-
-    # 테스트 시작
-    test_loss, origin_loss = test(
-        model=model,
-        test_loader=test_loader,
-        device=device,
-        save_root=out_put_dir,
-        max_demand=dataset.max_demand,
-        dropped_point=dataset.dropped_point,
-        assignment_matrix=None
-    )
-
-    model_path = f"{out_put_dir}/final_model.pth"
-    torch.save(model.state_dict(), model_path)
-    log.info(f"Model saved to {model_path}")
-
-    metric = {  # multi run시 결과 저장용
-        # "train_loss": train_losses[-1],
-        # "val_loss": val_losses[-1],
-        # "test_loss": test_loss,
-        "origin_loss": origin_loss,
-        # "epochs": config.train.epochs
-    }
-    results.append(metric)
-
+    trainer.train()
+    
+    test_results = test_loop(trainer_model, Test_dataset, output_dir, device)
+    results.append(test_results)
 
 if __name__ == "__main__":
     run()

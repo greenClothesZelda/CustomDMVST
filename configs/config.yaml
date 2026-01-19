@@ -2,66 +2,38 @@ project_name: Custom DMVSTNet
 seed: 42
 device: cuda
 dataset:
-  root: ./data
-  time_step: 5
-loader:
-  train:
-    ratio: 0.7
-    batch_size: 50
-    shuffle: true
-  val:
-    ratio: 0.15
-    batch_size: 1000
-    shuffle: false
-  test:
-    ratio: 0.15
-    batch_size: 100
-    shuffle: false
+  root: data/raw
+  time_step: 8
+
+split:
+  ir_ratio: 0.1
+  train_ratio: 0.7
+
 model:
-  temporal_data_size: ${dataset.time_step}
-  Node_GNN:
-    k: 3
-    conv_in:
-      act_first: true
-    conv_hidden:
-      hidden_channels: 8
-      act: GELU
-      act_first: true
-    conv_out:
-      out_channels: 5
-      num_layers: 3
-      act_first: true
-  Node_LSTM:
-    hidden_size: 12
-    num_layers: 1
-    bias: false
-    bidirectional: false
-    proj_size: 0
-  Aggregated_LSTM:
-    hidden_size: 12
-    num_layers: 1
-    bias: false
-    bidirectional: false
-    proj_size: 0
-  Meteorological:
-    in_features: 4
-    out_features: 2
+  IRVSTNet:
+    embedding_dim: 8
+    lstm:
+      hidden_size: 16
+      num_layers: 2
+      dropout: 0.1
+
 train:
-  epochs: 500
-  shuffle: true
-  validation_split: 0.1
-  test_split: 0.2
-  alpha: 0.0
-  patience: 20
-  scheduler:
-    type: StepLR
-    params:
-      step_size: 10
-      gamma: 0.5
-  optimizer:
-    type: AdamW
-    params:
-      lr: 0.0005
-      weight_decay: 0.001
-test:
-  save_root: ./test_results
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  num_train_epochs: 300
+  remove_unused_columns: false
+  save_strategy: epoch
+  save_total_limit: 1
+  optim: adamw_torch
+  learning_rate: 5e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  logging_steps: 500
+  eval_strategy: epoch
+
+  load_best_model_at_end: true
+  metric_for_best_model: loss
+  greater_is_better: false
+callbacks:
+  early_stopping:
+    early_stopping_patience: 3

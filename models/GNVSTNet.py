@@ -1,96 +1,113 @@
 import torch
 import torch.nn as nn
 
-from models.GNN import GNN
-from models.loader.GNVSTDataset import MyGraphDataset
-from torch_geometric.loader import DataLoader
-
-
-class GNVSTNet(nn.Module):
-    def __init__(
-            self,
-            context_dim,
-            temporal_data_size,
-            Node_GNN_configs,
-            Node_LSTM_configs,
-            aggregated_LSTM_configs,
-            Meteorological_configs,
-            device
-    ):
+class IRModule(nn.Module):
+    def __init__(self, IRdataset):
         super().__init__()
+        if hasattr(IRdataset, 'dataset'):
+            source_dataset = IRdataset.dataset
+        else:
+            source_dataset = IRdataset
 
-        self.node_gnn = GNN(**Node_GNN_configs)
+        self.num_nodes = source_dataset.num_nodes
+        self.max_demand = source_dataset.max_demand
+        self.num_weather_features = source_dataset.weather_list.shape[1]
+    def forward(self, x):
+        pass
 
-        self.aggregated_lstm = nn.LSTM(
-            input_size= 1 + Meteorological_configs['out_features'],
+class IRVSTNet(nn.Module):
+    def __init__(self, ir_module, embedding_dim, **kwargs):
+        super().__init__()
+        self.ir_module = ir_module
+
+        self.node_embedding = nn.Embedding(
+            num_embeddings=ir_module.num_nodes,
+            embedding_dim=embedding_dim
+        )
+
+        self.demand_embedding = nn.Embedding(
+            num_embeddings=ir_module.max_demand + 1,
+            embedding_dim=embedding_dim
+        )
+
+        self.weather_embedding_layer = nn.Linear(
+            in_features=ir_module.num_weather_features,
+            out_features=embedding_dim
+        )
+
+        self.lstm = nn.LSTM(
             batch_first=True,
-            **aggregated_LSTM_configs
+            input_size=embedding_dim,
+            hidden_size=kwargs['lstm']['hidden_size'],
+            num_layers=kwargs['lstm']['num_layers'],
+            dropout=kwargs['lstm']['dropout'],
+            bidirectional=True
+        )
+        self.lstm_embedding_layer = nn.Linear(
+            in_features=2 * kwargs['lstm']['hidden_size'],
+            out_features=embedding_dim
         )
 
-        self.node_lstm = nn.LSTM(
-            input_size= 1 + #Node_GNN_configs['conv_out']['out_channels'] +
-            Meteorological_configs['out_features'],
-            batch_first=True,
-            **Node_LSTM_configs
+        self.final_layer = nn.Sequential(
+            nn.Linear(
+                in_features=embedding_dim,
+                out_features=1
+            )
         )
 
-        self.aggregated_final_out = nn.Linear(
-            aggregated_LSTM_configs['hidden_size']+context_dim,
-            1
-        )
+    def demand_average(self, demands_series):
+        demands_series = demands_series.to(torch.float32)
+        return torch.mean(demands_series, dim=2, keepdim=True) # (B, N, 1)
 
-        self.node_final_out = nn.Linear(
-            Node_LSTM_configs['hidden_size']+context_dim ,
-            1
-        )
+    def forward(self, demands_series, weather):
+        B, N, T = demands_series.size()
+        embedded_demands = self.demand_embedding(
+            demands_series
+        )  # (B, N, T, D)
 
-        self.temporal_embedding_layer = nn.Linear(  # meteorological data를 임베딩하는 선형층
-            in_features=Meteorological_configs['in_features'],  # 날씨 피처 개수
-            out_features=Meteorological_configs['out_features']
-        )
-        self.sigmoid = nn.Sigmoid()
+        weather_embedded = self.weather_embedding_layer(weather).unsqueeze(1) # (B, 1, D)
+        weather_embedded = weather_embedded.unsqueeze(2).expand(-1, N, T, -1)  # (B, N, T, D)
 
-        with torch.no_grad():
-            self.node_final_out.weight.fill_(0.0)
-            self.node_final_out.bias.fill_(0.0)
-            
-            self.aggregated_final_out.weight.fill_(0.0)
-            self.aggregated_final_out.bias.fill_(0.0)
+        node_indices = torch.arange(N, device=demands_series.device).unsqueeze(0).expand(B, N)
+        node_embedded = self.node_embedding(node_indices)  # (B, N, D)
+        node_embedded = node_embedded.unsqueeze(2).expand(-1, -1, T, -1)  # (B, N, T, D)
 
-            print("Initialized final linear layers with zeros.")
-            print(f"Node final out weights: {self.node_final_out.weight}")
-            print(f'Node final out bias: {self.node_final_out.bias}')
+        lstm_input = embedded_demands + node_embedded + weather_embedded  # (B, N, T, D)
+        lstm_input = lstm_input.view(B * N, T, -1)  # (B*N, T, D)
 
+        lstm_out, _ = self.lstm(lstm_input)  # (B*N, T, 2*H)
+        lstm_out = self.lstm_embedding_layer(lstm_out[:, -1, :])  # (B*N, D)
+        lstm_out = lstm_out.view(B, N, -1)  # (B, N, D)
 
-    def forward(
-            self,
-            node_data,
-            context_data=None
-    ):
-        num_graphs = node_data.num_graphs
-        B = num_graphs
-        x = node_data.x[:, :, 0]  # [B*n, time_step]
-        T = x.size(1)
+        #TODO: IR 모듈과의 연동
 
-        weather = node_data.weather  # [B * time_step, 4]
-        weather_embedded = self.temporal_embedding_layer(weather)  # [B * time_step, temporal_data_size]
-        #print(f'weather_embedded shape: {weather_embedded.shape}')
-        aggregated_x = node_data.all_x.view(B, -1) 
-        mean_aggregated_x = torch.mean(aggregated_x, dim=1)
-        aggregated_x = torch.cat([aggregated_x.unsqueeze(-1), weather_embedded.view(B, -1, weather_embedded.size(-1))], dim=-1) # [B, n, 1 + temporal_data_size]
-        aggregated_x, _ = self.aggregated_lstm(aggregated_x)
-        aggregated_x = aggregated_x[:, -1, :]  # [B, lstm_hidden_size]
-        aggregated_x = self.aggregated_final_out(aggregated_x).squeeze(-1) + mean_aggregated_x
+        out = self.final_layer(lstm_out)  # (B, N, 1)
+        out += self.demand_average(demands_series)  # (B, N, 1)
+        return out.squeeze(-1)  # (B, N)
+    
+class ModelTrainer(nn.Module):
+    def __init__(self, model, **kwargs):
+        super().__init__()
+        self.model = model
+        self.loss_fn = kwargs.get('loss', nn.L1Loss())
 
-        mean_x = torch.mean(x, dim=1) # [B, n]
-        #print(f'x shape: {x.shape}, weather_embedded shape: {weather_embedded.shape}')
-        x = x.view(B, -1, T, 1)
-        weather_embedded= weather_embedded.view(B, 1, T, -1).expand(-1, x.size(1), -1, -1)
-        x = torch.cat([x, weather_embedded], dim=-1)  # [B*n, time_step, node_feature + temporal_data_size]
-        x = x.view(B * x.size(1), T, -1)  # [B*n, time_step, node_feature + temporal_data_size]
-        #print(f'x before GNN shape: {x.shape}')
-        x, _ = self.node_lstm(x)
-        x = x[:, -1, :]  # [B*n, lstm_hidden_size]
-        x = self.node_final_out(x).squeeze(-1)
+    def forward(self, demands_series, weather, labels=None, return_dict=True, **kwargs):
+        predictions = self.model(demands_series, weather)
 
-        return aggregated_x, x, mean_x
+        loss = None
+        if labels is not None:
+            loss = self.loss_fn(predictions, labels)
+        if return_dict:
+            return {
+                'predictions': predictions,
+                'loss': loss
+            }
+        else:
+            return predictions, loss
+        
+def collate_fn(features):
+    batch = {}
+    keys = features[0].keys()
+    for key in keys:
+        batch[key] = torch.stack([f[key] for f in features], dim=0)
+    return batch

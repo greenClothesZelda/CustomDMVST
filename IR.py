@@ -1,6 +1,6 @@
 import torch
 import tqdm
-from models.loader.GNVSTDataset import MyGraphDataset
+from models.loader.DemandDataset import MyGraphDataset
 
 class NodeSpecificRetriever:
     def __init__(self, train_dataset, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -29,7 +29,7 @@ class NodeSpecificRetriever:
         
         self.num_nodes = self.db_keys.shape[0]
         self.num_samples = self.db_keys.shape[1]
-        
+
         print(f"Database stacked: Nodes={self.num_nodes}, Samples={self.num_samples}, Time_Steps={self.db_keys.shape[2]}")
         # --- 2. 정규화 미리 계산 ---
         # (Nodes, Num_Train_Samples, 1)
