@@ -3,7 +3,7 @@ seed: 42
 device: cuda
 dataset:
   root: ./data
-  time_step: 8
+  time_step: 5
 loader:
   train:
     ratio: 0.7
@@ -19,19 +19,6 @@ loader:
     shuffle: false
 model:
   temporal_data_size: ${dataset.time_step}
-  Cluster_GNN:
-    k: 2
-    conv_in:
-      act_first: true
-    conv_hidden:
-      hidden_channels: 8
-      act: GELU
-      act_first: true
-    conv_out:
-      out_channels: 5
-      num_layers: 2
-      act_first: true
-      
   Node_GNN:
     k: 3
     conv_in:
@@ -44,22 +31,28 @@ model:
       out_channels: 5
       num_layers: 3
       act_first: true
-  LSTM:
+  Node_LSTM:
     hidden_size: 12
     num_layers: 1
-    bias: true
-    batch_first: true
+    bias: false
     bidirectional: false
     proj_size: 0
+  Aggregated_LSTM:
+    hidden_size: 12
+    num_layers: 1
+    bias: false
+    bidirectional: false
+    proj_size: 0
+  Meteorological:
+    in_features: 4
+    out_features: 2
 train:
-  epochs: 50
-  learning_rate: 0.005
-  weight_decay: 0.001
+  epochs: 500
   shuffle: true
   validation_split: 0.1
   test_split: 0.2
-  alpha: 0.3
-  patience: 3
+  alpha: 0.0
+  patience: 20
   scheduler:
     type: StepLR
     params:
@@ -68,10 +61,7 @@ train:
   optimizer:
     type: AdamW
     params:
-      lr: 0.005
+      lr: 0.0005
       weight_decay: 0.001
-  criterion:
-    node_max_weight: 30
-    cluster_max_weight: 50
 test:
   save_root: ./test_results

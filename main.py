@@ -9,8 +9,6 @@ from models.GNVSTNet import GNVSTNet
 from models.loader.GNVSTDataset import MyGraphDataset
 from torch_geometric.loader import DataLoader
 from runners.trainer import *
-from models.loader.jointDataset import JointDataset, get_joint_datasets
-
 from omegaconf import OmegaConf
 
 
@@ -65,25 +63,7 @@ class WeightedMAELoss(nn.Module):
         loss = weighted_mae.sum() / weights.sum()
 
         return loss
-    
-class DistributionLoss(nn.Module):
-    def __init__(self, assignment_matrix, device):
-        super().__init__()
-        self.assignment_matrix = assignment_matrix.to(device).unsqueeze(0) # [1, num_nodes, num_clusters]
-        self.num_clusters = assignment_matrix.size(1)
-        self.num_nodes = assignment_matrix.size(0)
-        self.CSE = nn.CrossEntropyLoss()
 
-    def forward(self, pred, target): #pred, target: [B, num_nodes]
-        pred = pred.unsqueeze(-1) # [B, num_nodes, 1]
-        target = target.unsqueeze(-1) # [B, num_nodes, 1]
-        assignment_matrix = self.assignment_matrix.expand(pred.size(0), -1, -1) # [B, num_nodes, num_clusters]
-
-        pred_distribution = (assignment_matrix * pred).permute(0, 2, 1) # [B, num_clusters, num_nodes]
-        target_distribution = (assignment_matrix * target).permute(0, 2, 1) # [B, num_clusters, num_nodes]
-
-        loss = self.CSE(pred_distribution, target_distribution)
-        return loss
 
 @hydra.main(config_path="configs", version_base=None)
 def run(config):
@@ -96,12 +76,12 @@ def run(config):
     OmegaConf.set_struct(model_cfg, False)
 
     # 데이터셋 및 데이터로더 설정
-    dataset = get_joint_datasets(
-        node_dataset_config=dataset_cfg, cluster_dataset_config=dataset_cfg)
+    dataset = MyGraphDataset(
+        root=dataset_cfg.root,
+        time_step=dataset_cfg.time_step
+    )
 
-    model_cfg['Node_GNN']['conv_in']['in_channels'] = dataset.node_dataset.num_node_features
-    model_cfg['Cluster_GNN']['conv_in']['in_channels'] = dataset.cluster_dataset.num_node_features + \
-        model_cfg.Node_GNN['conv_out']['out_channels']
+    model_cfg['Node_GNN']['conv_in']['in_channels'] = dataset.num_node_features
 
     train_size = int(len(dataset) * config.loader.train.ratio)
     val_size = int(len(dataset) * config.loader.val.ratio)
@@ -124,11 +104,24 @@ def run(config):
         context_dim=0,
         temporal_data_size=model_cfg.temporal_data_size,
         Node_GNN_configs=model_cfg.Node_GNN,
-        Cluster_GNN_configs=model_cfg.Cluster_GNN,
-        LSTM_configs=model_cfg.LSTM,
-        assignment_matrix=dataset.assignment_matrix,
+        Node_LSTM_configs=model_cfg.Node_LSTM,
+        aggregated_LSTM_configs=model_cfg.Aggregated_LSTM,
+        Meteorological_configs=model_cfg.Meteorological,
         device=device
     ).to(device)
+
+    out_put_dir = HydraConfig.get().runtime.output_dir  # 모델 저장할 때 사용
+
+    _, initial_test_loss = test(
+        model=model,
+        test_loader=test_loader,
+        device=device,
+        save_root='./temp',
+        max_demand=dataset.max_demand,
+        dropped_point=dataset.dropped_point,
+        assignment_matrix=None
+    )
+    log.info(f'Initial test loss before training: {initial_test_loss:.4f}')
 
     # 훈련 시작
     train_losses, val_losses = train(
@@ -138,15 +131,8 @@ def run(config):
         device=device,
         optimizer=getattr(torch.optim, train_cfg.optimizer.type)(
             model.parameters(), **train_cfg.optimizer.params),
-        criterion_cluster=WeightedMAELoss(
-            count_data=dataset.cluster_dataset.count_data,
-            max_demand=dataset.cluster_dataset.max_demand,
-            max_weight=train_cfg.criterion.cluster_max_weight
-        ),
-        criterion_node=DistributionLoss(
-            assignment_matrix=dataset.assignment_matrix,
-            device=device
-        ),
+        criterion_cluster=nn.L1Loss(),
+        criterion_node=nn.L1Loss(),
         scheduler=getattr(torch.optim.lr_scheduler, train_cfg.scheduler.type)(
             getattr(torch.optim, train_cfg.optimizer.type)(
                 model.parameters(),
@@ -159,17 +145,15 @@ def run(config):
         patience=train_cfg.patience
     )
 
-    out_put_dir = HydraConfig.get().runtime.output_dir  # 모델 저장할 때 사용
-
     # 테스트 시작
-    test_loss, origin_loss= test(
+    test_loss, origin_loss = test(
         model=model,
         test_loader=test_loader,
         device=device,
         save_root=out_put_dir,
-        max_demand=dataset.node_dataset.max_demand,
-        dropped_point=dataset.node_dataset.dropped_point,
-        assignment_matrix=dataset.assignment_matrix
+        max_demand=dataset.max_demand,
+        dropped_point=dataset.dropped_point,
+        assignment_matrix=None
     )
 
     model_path = f"{out_put_dir}/final_model.pth"

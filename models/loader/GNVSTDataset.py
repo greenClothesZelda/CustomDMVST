@@ -1,5 +1,6 @@
 import os
 from xml.sax.handler import all_features
+from matplotlib import axis
 import torch
 from torch_geometric.data import InMemoryDataset, Data
 import json
@@ -99,10 +100,13 @@ class MyGraphDataset(InMemoryDataset):
             # print(x.shape)
             y = all_demands[i + self.time_step][:, 0]  # [num_nodes]
 
+            all_x = x[:, :, 0].sum(axis=0)
+            all_y = y.sum(axis=0)
+
             weather = self.weather_list[i: i + self.time_step]
 
             data = Data(x=x, edge_index=edge_index,
-                        edge_attr=edge_attr, y=y, weather=weather)
+                        edge_attr=edge_attr, y=y, weather=weather, all_x=all_x, all_y=all_y)
             data_list.append(data)
 
         if self.pre_filter is not None:

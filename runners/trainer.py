@@ -9,24 +9,21 @@ import torch.nn.functional as F
 log = logging.getLogger(__name__)
 
 
-def train_one_epoch(model, loader, device, optimizer, criterion_cluster, criterion_node, alpha, scheduler):
+def train_one_epoch(model, loader, device, optimizer, criterion_cluster, criterion_node, alpha):
     model.train()
     total_loss = 0
-    for (node_data, cluster_data) in loader:
+    for node_data in loader:
         node_data = node_data.to(device)
-        cluster_data = cluster_data.to(device)
         optimizer.zero_grad()
-        cluster_out, node_out = model(
-            node_data=node_data, cluster_data=cluster_data, context_data=None)
-        # print(f'cluster_out shape: {cluster_out.shape}, cluster_data.y shape: {cluster_data.y.shape}')
-        # print(f'node_out shape: {node_out.shape}, node_data.y shape: {node_data.y.shape}')
+        aggregated_out, node_out, mean_x = model(
+            node_data=node_data, context_data=None)
+        node_out = node_out + mean_x
         loss_cluster = criterion_cluster(
-            cluster_out.reshape(-1, 1), cluster_data.y.view(-1, 1).to(device))
+            aggregated_out.reshape(-1, 1), node_data.all_y.view(-1, 1).to(device))
         B = node_data.num_graphs
-        loss_node = criterion_node(node_out.reshape(B, -1),
-                                   node_data.y.view(B, -1).to(device))
-        
-        loss = alpha * loss_cluster + (1-alpha) * loss_node
+        loss_node = criterion_node(
+            node_out.reshape(B, -1), node_data.y.view(B, -1).to(device))
+        loss = alpha * loss_cluster + (1 - alpha) * loss_node
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
@@ -39,25 +36,23 @@ def train_one_epoch(model, loader, device, optimizer, criterion_cluster, criteri
 def validate(model, loader, device, criterion_cluster, criterion_node, alpha):
     model.eval()
     total_loss = 0
-    for (node_data, cluster_data) in loader:
+    for node_data in loader:
         node_data = node_data.to(device)
-        cluster_data = cluster_data.to(device)
-        cluster_out, node_out = model(
-            node_data, cluster_data, context_data=None)
+        aggregated_out, node_out, mean_x = model(node_data, context_data=None)
+        node_out = node_out + mean_x
         loss_cluster = criterion_cluster(
-            cluster_out.reshape(-1, 1), cluster_data.y.view(-1, 1).to(device))
-        
+            aggregated_out.reshape(-1, 1), node_data.all_y.view(-1, 1).to(device))
         B = node_data.num_graphs
         loss_node = criterion_node(
             node_out.reshape(B, -1), node_data.y.view(B, -1).to(device))
-        loss = alpha * loss_cluster + (1-alpha) * loss_node
+        loss = alpha * loss_cluster + (1 - alpha) * loss_node
         total_loss += loss.item()
         # break  # 디버깅용: 한 배치만 처리
     avg_loss = total_loss / len(loader)
     return avg_loss
 
 
-def train(model, train_loader, val_loader, device, optimizer, criterion_cluster, criterion_node, scheduler, epochs, alpha, patience=10, min_delta=1e-4):
+def train(model, train_loader, val_loader, device, optimizer, criterion_cluster, criterion_node, scheduler, epochs, alpha, patience=10, min_delta=0):
     train_losses = []
     val_losses = []
 
@@ -68,7 +63,7 @@ def train(model, train_loader, val_loader, device, optimizer, criterion_cluster,
 
     for epoch in range(epochs):
         train_loss = train_one_epoch(
-            model, train_loader, device, optimizer, criterion_cluster, criterion_node, alpha, scheduler)
+            model, train_loader, device, optimizer, criterion_cluster, criterion_node, alpha)
         val_loss = validate(model, val_loader, device,
                             criterion_cluster, criterion_node, alpha)
 
@@ -109,48 +104,61 @@ def train(model, train_loader, val_loader, device, optimizer, criterion_cluster,
 @torch.no_grad()
 def test(model, test_loader, device, save_root, max_demand, assignment_matrix, dropped_point=0):
     model.eval()
-    assignment_matrix = assignment_matrix.to(device)
+    all_means = []
     all_outputs = []
+    moving_avg_losses = []
     criterion = nn.L1Loss()
     total_loss = 0
+    total_moving_avg_loss = 0
     total_samples = 0
     all_targets = []
-    for (node_data, cluster_data) in test_loader:
+    num_nodes = None
+    for node_data in test_loader:
         node_data = node_data.to(device)
-        cluster_data = cluster_data.to(device)
-        cluster_out, node_out = model(
-            node_data, cluster_data, context_data=None)
+        _, node_out, mean_x = model(node_data, context_data=None)
+        node_out = node_out + mean_x
+
+        all_means.append(mean_x.cpu())
+        moving_avg_loss = criterion(mean_x.view(-1, 1), node_data.y.view(-1, 1).to(device))
+        moving_avg_losses.append(moving_avg_loss.item())
+
         B = node_data.num_graphs
-        node_out = node_out.reshape(B, -1)
-        node_distribution = F.softmax((assignment_matrix.unsqueeze(0) * node_out.unsqueeze(-1)).permute(0, 2, 1), dim=-1)  # [B, num_clusters, num_nodes]
-        cluster_y = cluster_out.view(B, -1)
+        pred_nodes = node_out.reshape(B, -1)
+        target_nodes = node_data.y.view(B, -1)
 
-        node_allocations = torch.sum(assignment_matrix, dim=1)  # [num_clusters]
-        node_allocations = torch.clamp(node_allocations, min=1e-9)
+        if num_nodes is None:
+            num_nodes = target_nodes.size(1)
 
-        # print(f'node_distribution shape: {node_distribution.shape}, cluster_y shape: {cluster_y.shape}, node_allocations shape: {node_allocations.shape}')
-
-        reconstructed_node_y = torch.einsum('b c, b c n -> b n',
-                                            cluster_y, node_distribution)
-        reconstructed_node_y = reconstructed_node_y / node_allocations.unsqueeze(0)
-        loss = criterion(reconstructed_node_y, node_data.y.view(B, -1))
+        loss = criterion(pred_nodes, target_nodes)
         total_loss += loss.item() * B
+        total_moving_avg_loss += moving_avg_loss.item() * B
         total_samples += B
-        all_outputs.append(reconstructed_node_y.reshape(-1).cpu())
-        all_targets.append(node_data.y.cpu())
-        
+        all_outputs.append(pred_nodes.reshape(-1).cpu())
+        all_targets.append(target_nodes.reshape(-1).cpu())
+
     avg_loss = total_loss / total_samples * max_demand
-    log.info(f"Test Loss: {avg_loss:.4f}")
+    moving_avg_loss = total_moving_avg_loss / total_samples * max_demand
+
+    log.info(f"Test MAE (nodes only): {avg_loss:.4f}")
     log.info(f"Dropped Points during testing: {dropped_point}")
-    original_loss = avg_loss * assignment_matrix.size(0) + dropped_point
+    original_loss = avg_loss * \
+        (num_nodes if num_nodes is not None else 0) + dropped_point
+    
+    original_moving_avg_loss = moving_avg_loss * \
+        (num_nodes if num_nodes is not None else 0) + dropped_point
+    log.info(f'original moving average loss: {original_moving_avg_loss:.4f}')
 
     all_outputs = torch.cat(all_outputs, dim=0).squeeze().numpy() * max_demand
     all_targets = torch.cat(all_targets, dim=0).squeeze().numpy() * max_demand
+    all_means = torch.cat(all_means, dim=0).squeeze().numpy() * max_demand
 
-    print(f'All outputs shape: {all_outputs.shape}, All targets shape: {all_targets.shape}')
+    print(
+        f'All outputs shape: {all_outputs.shape}, All targets shape: {all_targets.shape}')
     results_df = pd.DataFrame({
         'Predicted': all_outputs,
-        'Actual': all_targets
+        'Actual': all_targets,
+        'Mean':  all_means,
+        'Model_Effect': all_outputs - all_means
     })
     results_path = f"{save_root}/test_results.csv"
     results_df.to_csv(results_path, index=False)
