@@ -17,8 +17,9 @@ def test_loop(model, test_dataset, output_dir, device):
         demands_series = batch['demands_series'].to(device)
         weather = batch['weather'].to(device)
         labels = batch['labels'].to(device)
+        time = batch['time'].to(device)
         
-        outputs = model(demands_series, weather, labels=labels, return_dict=True)
+        outputs = model(demands_series, weather, time, labels=labels, return_dict=True)
         predictions = outputs['predictions']
         
         all_predictions.append(predictions.cpu())

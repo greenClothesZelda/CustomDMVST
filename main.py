@@ -30,6 +30,17 @@ def set_seed(seed):
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
 
+class EarlyStoppingWithMinEpochs(EarlyStoppingCallback):
+    def __init__(self, min_epochs=5, early_stopping_patience=3, early_stopping_threshold=0.0):
+        super().__init__(early_stopping_patience=early_stopping_patience,
+                         early_stopping_threshold=early_stopping_threshold)
+        self.min_epochs = min_epochs
+    def on_evaluate(self, args, state, control, **kwargs):
+        if state.epoch is not None and state.epoch < self.min_epochs:
+            log.info(f"Skipping early stopping check at epoch {state.epoch} (min_epochs={self.min_epochs})")
+            return control
+        return super().on_evaluate(args, state, control, **kwargs)
+
 @hydra.main(config_path="configs", version_base=None)
 def run(config):
     set_seed(config.seed)
@@ -71,7 +82,7 @@ def run(config):
         train_dataset=Train_dataset,
         eval_dataset=Test_dataset,
         data_collator=collate_fn,
-        callbacks=[EarlyStoppingCallback(**config.callbacks.early_stopping)]
+        callbacks=[EarlyStoppingWithMinEpochs(**config.callbacks.early_stopping)]
     )
     trainer.train()
     

@@ -1,21 +1,22 @@
-project_name: Custom DMVSTNet
+project_name: IR_based_DMVST
 seed: 42
 device: cuda
 dataset:
   root: data/raw
-  time_step: 8
+  time_step: 24
 
 split:
-  ir_ratio: 0.1
-  train_ratio: 0.7
+  ir_ratio: 0.25
+  train_ratio: 0.65
 
 model:
   IRVSTNet:
-    embedding_dim: 8
+    embedding_dim: 32
     lstm:
-      hidden_size: 16
-      num_layers: 2
+      hidden_size: 32
+      num_layers: 3
       dropout: 0.1
+      nhead: 1
   IRModule:
     k: 5
 train:
@@ -35,6 +36,15 @@ train:
   load_best_model_at_end: true
   metric_for_best_model: loss
   greater_is_better: false
+
 callbacks:
   early_stopping:
+    min_epochs: 20
     early_stopping_patience: 3
+
+hydra:
+  run:
+    dir: outputs/${project_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/${project_name}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
