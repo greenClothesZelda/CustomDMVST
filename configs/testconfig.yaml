@@ -3,17 +3,17 @@ seed: 42
 device: cuda
 dataset:
   root: data/raw
-  time_step: 8
+  time_step: 24
 
 split:
-  ir_ratio: 0.1
-  train_ratio: 0.7
+  ir_ratio: 0.25
+  train_ratio: 0.65
 
 model:
   IRVSTNet:
-    embedding_dim: 8
+    embedding_dim: 32
     lstm:
-      hidden_size: 16
+      hidden_size: 32
       num_layers: 2
       dropout: 0.1
   IRModule:
@@ -29,7 +29,7 @@ train:
   learning_rate: 5e-4
   weight_decay: 0.01
   warmup_ratio: 0.1
-  logging_steps: 500
+  logging_steps: 5000
   eval_strategy: epoch
 
   load_best_model_at_end: true
@@ -37,4 +37,4 @@ train:
   greater_is_better: false
 callbacks:
   early_stopping:
-    early_stopping_patience: 3
+    early_stopping_patience: 5

@@ -2,8 +2,11 @@ import torch
 import torch.nn as nn
 
 class IRModule(nn.Module):
-    def __init__(self, IRdataset):
+    def __init__(self, IRdataset, device, k):
         super().__init__()
+        self.device = device
+        self.k = k
+        assert k > 0, "k must be greater than 0"
         if hasattr(IRdataset, 'dataset'):
             source_dataset = IRdataset.dataset
         else:
@@ -12,13 +15,57 @@ class IRModule(nn.Module):
         self.num_nodes = source_dataset.num_nodes
         self.max_demand = source_dataset.max_demand
         self.num_weather_features = source_dataset.weather_list.shape[1]
-    def forward(self, x):
-        pass
+
+        x_list = []
+        y_list = []
+
+        for data in IRdataset:
+            #print(f'Data x shape: {data["demands_series"].shape}, y shape: {data["labels"].shape}')
+            x_list.append(data['demands_series'].to(torch.float32)) # (N, T)
+            y_list.append(data['labels'].unsqueeze(1)) # (N, 1)
+
+        self.db_keys = torch.stack(x_list).permute(1, 0, 2).to(device) # (N, Samples, T)
+        self.db_values = torch.stack(y_list).permute(1, 0, 2).to(device) # (N, Samples, 1)
+
+        self.num_samples = self.db_keys.shape[1]
+
+        print(f'IRModule initialized: Nodes={self.num_nodes}, Samples={self.num_samples}, Time_Steps={self.db_keys.shape[2]}')
+        print(f'db_keys shape: {self.db_keys.shape}, db_values shape: {self.db_values.shape}')
+
+        self.db_norms = torch.norm(self.db_keys, dim=2, keepdim=True) + 1e-8
+        
+    def forward(self, query):        
+        queries = query.to(self.device).unsqueeze(2).to(torch.float32) # (B, N, 1, T)
+        db_keys_transposed = self.db_keys.permute(0, 2, 1) # (N, T, Samples)
+
+        dot = torch.matmul(queries, db_keys_transposed) # (B, N, 1, Samples)
+
+        q_norm = torch.norm(queries, dim=3, keepdim=True) + 1e-8 # (B, N, 1, 1)
+        db_norms = self.db_norms.permute(0, 2, 1) # (N, 1, Samples)
+        norms = q_norm * db_norms # (B, N, 1, Samples)
+
+        cosine_similarities = dot / norms # (B, N, 1, Samples)
+        value, indices = torch.topk(cosine_similarities, self.k, dim=3) # (B, N, 1, k)
+        weight = torch.softmax(value, dim=3) # (B, N, 1, k)
+
+        db_v = self.db_values.unsqueeze(0)
+        idx = indices.transpose(2,3) # (B, N, k, 1)
+
+        retrieved_values = torch.gather(
+            db_v.expand(queries.size(0), -1, -1, -1), 
+            2, 
+            idx
+        )
+
+        aggregated = torch.sum(retrieved_values.squeeze(-1) * weight.squeeze(2), dim=2)
+        return aggregated, idx # (B, N)
 
 class IRVSTNet(nn.Module):
     def __init__(self, ir_module, embedding_dim, **kwargs):
         super().__init__()
         self.ir_module = ir_module
+        for param in self.ir_module.parameters():
+            param.requires_grad = False
 
         self.node_embedding = nn.Embedding(
             num_embeddings=ir_module.num_nodes,
@@ -54,7 +101,10 @@ class IRVSTNet(nn.Module):
                 out_features=1
             )
         )
-
+        self.lambda_layer = nn.Linear(
+            in_features=embedding_dim+1,
+            out_features=1
+        )
     def demand_average(self, demands_series):
         demands_series = demands_series.to(torch.float32)
         return torch.mean(demands_series, dim=2, keepdim=True) # (B, N, 1)
@@ -79,11 +129,15 @@ class IRVSTNet(nn.Module):
         lstm_out = self.lstm_embedding_layer(lstm_out[:, -1, :])  # (B*N, D)
         lstm_out = lstm_out.view(B, N, -1)  # (B, N, D)
 
-        #TODO: IR 모듈과의 연동
+        ir_out, _ = self.ir_module(demands_series)  # (B, N)
 
-        out = self.final_layer(lstm_out)  # (B, N, 1)
-        out += self.demand_average(demands_series)  # (B, N, 1)
-        return out.squeeze(-1)  # (B, N)
+        out = self.final_layer(lstm_out).squeeze(-1)  # (B, N)
+
+        lambda_input = torch.cat([lstm_out, ir_out.unsqueeze(-1)], dim=-1)  # (B, N, D+1)
+        lambda_weight = torch.sigmoid(self.lambda_layer(lambda_input)).squeeze(-1)
+        out = lambda_weight * out + (1 - lambda_weight) * ir_out  # (B, N)
+    
+        return out  # (B, N)
     
 class ModelTrainer(nn.Module):
     def __init__(self, model, **kwargs):
@@ -96,7 +150,7 @@ class ModelTrainer(nn.Module):
 
         loss = None
         if labels is not None:
-            loss = self.loss_fn(predictions, labels)
+            loss = self.loss_fn(predictions, labels.to(torch.float32))
         if return_dict:
             return {
                 'predictions': predictions,

@@ -54,7 +54,7 @@ def run(config):
     Test_dataset = Subset(dataset, indices[IR_dataset_size + Train_dataset_size:])
     log.info(f"Dataset sizes - IR: {len(IR_dataset)}, Train: {len(Train_dataset)}, Test: {len(Test_dataset)}")
     
-    ir_module = IRModule(IR_dataset)
+    ir_module = IRModule(IR_dataset, device, k=config.model.IRModule.k)
     model = IRVSTNet(ir_module=ir_module, **config.model['IRVSTNet'])
     trainer_model = ModelTrainer(model).to(device)
 
