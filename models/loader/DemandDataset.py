@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 
 class MyDataset(torch.utils.data.Dataset):
-    def __init__(self, root, time_step, target_columns=['강수량(mm)', '기온(°C)', '습도(%)', '적설(cm)']):
+    def __init__(self, root, time_step, size, num_nodes, target_columns=['강수량(mm)', '기온(°C)', '습도(%)', '적설(cm)']):
         super(MyDataset, self).__init__()
 
         df = pd.read_csv(root/'meteorological_data.csv', encoding='cp949')
@@ -30,12 +30,12 @@ class MyDataset(torch.utils.data.Dataset):
 
         time = torch.arange(0, 24).unsqueeze(1).repeat(self.time.shape[0]//24, 1).view(-1,1) / 24.0  # (num_samples, 1)
         self.time = torch.cat([self.time, time], dim=1)  # (num_samples, 8)
-        grid = np.load(root/'grid(9500).npy')
+        grid = np.load(root/f'grid({size}).npy')
         self.origin_demand_arr = torch.from_numpy(grid).to(torch.long)
         self.origin_demand_arr = self.origin_demand_arr.reshape(self.origin_demand_arr.shape[0], -1) # (T, num_nodes)
 
         
-        self.num_nodes = 35
+        self.num_nodes = num_nodes
         
         top_k_nodes = torch.topk(self.origin_demand_arr.sum(dim=0), self.num_nodes).indices
         self.demand_arr = self.origin_demand_arr[:, top_k_nodes] # (T, num_nodes)

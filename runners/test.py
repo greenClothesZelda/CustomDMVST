@@ -33,7 +33,7 @@ def test_loop(model, test_dataset, output_dir, device):
     dropped_points = test_dataset.dataset.dropped_points
     
     mae = torch.mean(dist).item()
-    mape = torch.mean(dist / (all_labels.flatten() + 1)).item()
+    mape = torch.mean(dist / (all_labels.flatten() + 1)).item() * 100
 
     result = pd.DataFrame({
         'Predictions': all_predictions.numpy().flatten(),

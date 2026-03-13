@@ -53,6 +53,8 @@ def run(config):
     dataset = MyDataset(
         root=Path(config.dataset.root),
         time_step=config.dataset.time_step,
+        num_nodes=config.dataset.num_nodes,
+        size=config.dataset.size
     )
     len_dataset = len(dataset)
     IR_dataset_size = int(len_dataset * config.split.ir_ratio)

@@ -4,6 +4,8 @@ device: cuda
 dataset:
   root: data/raw
   time_step: 24
+  num_nodes: 35
+  size: 7000
 
 split:
   ir_ratio: 0.25
@@ -21,8 +23,8 @@ model:
     k: 20
 train:
   per_device_train_batch_size: 32
-  per_device_eval_batch_size: 32
-  num_train_epochs: 300
+  per_device_eval_batch_size: 128
+  num_train_epochs: 60
   remove_unused_columns: false
   save_strategy: epoch
   save_total_limit: 1
