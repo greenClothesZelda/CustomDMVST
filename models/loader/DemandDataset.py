@@ -1,13 +1,16 @@
 import torch
 import pandas as pd
 import json
+import numpy as np
+import logging
+
+log = logging.getLogger(__name__)
+
 
 
 class MyDataset(torch.utils.data.Dataset):
     def __init__(self, root, time_step, target_columns=['강수량(mm)', '기온(°C)', '습도(%)', '적설(cm)']):
         super(MyDataset, self).__init__()
-        with open(root/'gwn_data.json', 'r') as f:
-            demand_data = json.load(f)
 
         df = pd.read_csv(root/'meteorological_data.csv', encoding='cp949')
         df_filled = df.fillna(0)
@@ -27,14 +30,21 @@ class MyDataset(torch.utils.data.Dataset):
 
         time = torch.arange(0, 24).unsqueeze(1).repeat(self.time.shape[0]//24, 1).view(-1,1) / 24.0  # (num_samples, 1)
         self.time = torch.cat([self.time, time], dim=1)  # (num_samples, 8)
+        grid = np.load(root/'grid(9500).npy')
+        self.origin_demand_arr = torch.from_numpy(grid).to(torch.long)
+        self.origin_demand_arr = self.origin_demand_arr.reshape(self.origin_demand_arr.shape[0], -1) # (T, num_nodes)
 
-        self.demand_arr = torch.tensor(demand_data['x'], dtype=torch.long)
         
-        self.num_nodes = self.demand_arr.shape[1]
+        self.num_nodes = 35
+        
+        top_k_nodes = torch.topk(self.origin_demand_arr.sum(dim=0), self.num_nodes).indices
+        self.demand_arr = self.origin_demand_arr[:, top_k_nodes] # (T, num_nodes)
+        
         self.time_step = time_step
         self.max_demand = int(torch.max(self.demand_arr).item())
 
-        self.dropped_points = demand_data['meta']['dropped_points']
+        self.dropped_points = self.origin_demand_arr.sum().item() - self.demand_arr.sum().item()
+        log.info(f"Dataset initialized: Total Points={self.origin_demand_arr.sum().item()}, Retained Points={self.demand_arr.sum().item()}, Dropped Points={self.dropped_points}, demand coverage={100 * self.demand_arr.sum().item() / self.origin_demand_arr.sum().item():.2f}%")
 
     def __getitem__(self, index):
         return {

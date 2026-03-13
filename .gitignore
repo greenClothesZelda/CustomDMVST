@@ -8,3 +8,5 @@ data/
 multirun/
 temp/
 projects
+
+*.out
