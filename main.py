@@ -1,45 +1,63 @@
-import torch
-import torch.nn.functional as F
-from torch.utils.data import Subset
-
-import hydra
-from hydra.core.hydra_config import HydraConfig
 import logging
 from pathlib import Path
 
-from transformers import Trainer, TrainingArguments, EarlyStoppingCallback
+import hydra
+import numpy as np
+import torch
+from hydra.core.hydra_config import HydraConfig
+from torch.utils.data import Subset
+from transformers import Trainer, TrainingArguments
 
-from models.GNVSTNet import *
+from models.GNVSTNet import IRModule, IRVSTNet, ModelTrainer, collate_fn
 from models.loader.DemandDataset import MyDataset
-from omegaconf import OmegaConf
-
 from runners.test import test_loop
 
 log = logging.getLogger(__name__)
-results = []  # multi run시 결과 한눈에 보기 위해 사용
+results = []
+
 
 def set_seed(seed):
     import numpy as np
     import random
+
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # 멀티 GPU 사용 시
+    torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
-    # 결정론적 연산을 위한 설정 (필요 시)
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
 
-class EarlyStoppingWithMinEpochs(EarlyStoppingCallback):
-    def __init__(self, min_epochs=5, early_stopping_patience=3, early_stopping_threshold=0.0):
-        super().__init__(early_stopping_patience=early_stopping_patience,
-                         early_stopping_threshold=early_stopping_threshold)
-        self.min_epochs = min_epochs
-    def on_evaluate(self, args, state, control, **kwargs):
-        if state.epoch is not None and state.epoch < self.min_epochs:
-            log.info(f"Skipping early stopping check at epoch {state.epoch} (min_epochs={self.min_epochs})")
-            return control
-        return super().on_evaluate(args, state, control, **kwargs)
+
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    if isinstance(predictions, tuple):
+        predictions = predictions[0]
+    if isinstance(labels, tuple):
+        labels = labels[0]
+    predictions = np.asarray(predictions, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.float32)
+
+    mae = np.mean(np.abs(predictions - labels))
+    mape = np.mean(np.abs(predictions - labels) / (labels + 1.0)) * 100.0
+    return {
+        'mae': float(mae),
+        'mape': float(mape)
+    }
+
+import torch.nn as nn
+class DMVSTLoss(nn.Module):
+    def __init__(self, lambda_rel=1.0, reduction="mean"):
+        super().__init__()
+        self.lambda_rel = lambda_rel
+        self.reduction = reduction
+
+    def forward(self, y_pred, y_true):
+        diff = y_true - y_pred
+        abs_diff = torch.abs(diff)
+        loss = abs_diff / (1.0 + y_true) + self.lambda_rel * abs_diff
+        if self.reduction == "sum":
+            loss = loss.sum()
+        return loss.mean()
+
 
 @hydra.main(config_path="configs", version_base=None)
 def run(config):
@@ -49,7 +67,6 @@ def run(config):
 
     output_dir = HydraConfig.get().runtime.output_dir
 
-    # 데이터셋 및 데이터로더 설정
     dataset = MyDataset(
         root=Path(config.dataset.root),
         time_step=config.dataset.time_step,
@@ -57,19 +74,29 @@ def run(config):
         size=config.dataset.size
     )
     len_dataset = len(dataset)
-    IR_dataset_size = int(len_dataset * config.split.ir_ratio)
-    Train_dataset_size = int(len_dataset * config.split.train_ratio)
+    train_end = int(len_dataset * config.split.train_ratio)
+    warmup = config.model.IRModule.k
 
-    indices = list(range(len_dataset))
-    
-    IR_dataset = Subset(dataset, indices[:IR_dataset_size])
-    Train_dataset = Subset(dataset, indices[IR_dataset_size:IR_dataset_size + Train_dataset_size])
-    Test_dataset = Subset(dataset, indices[IR_dataset_size + Train_dataset_size:])
-    log.info(f"Dataset sizes - IR: {len(IR_dataset)}, Train: {len(Train_dataset)}, Test: {len(Test_dataset)}")
-    
-    ir_module = IRModule(IR_dataset, device, k=config.model.IRModule.k)
+    if train_end <= warmup:
+        raise ValueError(f"train_end ({train_end}) must be greater than warmup ({warmup}).")
+    if train_end >= len_dataset:
+        raise ValueError(f"train_end ({train_end}) must be smaller than dataset length ({len_dataset}).")
+
+    train_indices = list(range(warmup, train_end))
+    test_indices = list(range(train_end, len_dataset))
+
+    train_dataset = Subset(dataset, train_indices)
+    test_dataset = Subset(dataset, test_indices)
+    log.info(
+        "Dataset sizes - RetrievalOnly: %s, Train: %s, Test: %s",
+        warmup,
+        len(train_dataset),
+        len(test_dataset)
+    )
+
+    ir_module = IRModule(dataset, device, k=config.model.IRModule.k)
     model = IRVSTNet(ir_module=ir_module, **config.model['IRVSTNet'])
-    trainer_model = ModelTrainer(model).to(device)
+    trainer_model = ModelTrainer(model, loss=DMVSTLoss()).to(device)
 
     args = TrainingArguments(
         **config['train'],
@@ -81,15 +108,16 @@ def run(config):
     trainer = Trainer(
         model=trainer_model,
         args=args,
-        train_dataset=Train_dataset,
-        eval_dataset=Test_dataset,
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
         data_collator=collate_fn,
-        callbacks=[EarlyStoppingWithMinEpochs(**config.callbacks.early_stopping)]
+        compute_metrics=compute_metrics
     )
     trainer.train()
-    
-    test_results = test_loop(trainer_model, Test_dataset, output_dir, device)
+
+    test_results = test_loop(trainer_model, test_dataset, output_dir, device)
     results.append(test_results)
+
 
 if __name__ == "__main__":
     run()

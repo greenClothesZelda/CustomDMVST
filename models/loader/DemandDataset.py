@@ -1,6 +1,5 @@
 import torch
 import pandas as pd
-import json
 import numpy as np
 import logging
 
@@ -51,7 +50,8 @@ class MyDataset(torch.utils.data.Dataset):
             'demands_series': self.demand_arr[index:index + self.time_step].transpose(0, 1),  # (N, T)
             'labels': self.demand_arr[index + self.time_step],
             'time': self.time[index + self.time_step],
-            'weather': self.weather_list[index + self.time_step]
+            'weather': self.weather_list[index + self.time_step],
+            'sample_idx': torch.tensor(index, dtype=torch.long)
         }
 
     def __len__(self):
