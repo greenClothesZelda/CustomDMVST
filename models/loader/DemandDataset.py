@@ -32,11 +32,13 @@ class MyDataset(torch.utils.data.Dataset):
         grid = np.load(root/f'grid({size}).npy')
         self.origin_demand_arr = torch.from_numpy(grid).to(torch.long)
         self.origin_demand_arr = self.origin_demand_arr.reshape(self.origin_demand_arr.shape[0], -1) # (T, num_nodes)
+        self.total_num_points = self.origin_demand_arr.shape[1]
 
         
         self.num_nodes = num_nodes
         
         top_k_nodes = torch.topk(self.origin_demand_arr.sum(dim=0), self.num_nodes).indices
+        self.retained_flat_indices = top_k_nodes.clone()
         self.demand_arr = self.origin_demand_arr[:, top_k_nodes] # (T, num_nodes)
         
         self.time_step = time_step
@@ -56,3 +58,12 @@ class MyDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return self.demand_arr.shape[0] - self.time_step
+
+    def get_full_label(self, sample_idx):
+        label_index = int(sample_idx) + self.time_step
+        return self.origin_demand_arr[label_index]
+
+    def get_full_labels(self, sample_indices):
+        sample_indices = torch.as_tensor(sample_indices, dtype=torch.long)
+        label_indices = sample_indices + self.time_step
+        return self.origin_demand_arr[label_indices]

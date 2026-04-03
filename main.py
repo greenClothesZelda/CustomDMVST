@@ -38,9 +38,13 @@ def compute_metrics(eval_pred):
 
     mae = np.mean(np.abs(predictions - labels))
     mape = np.mean(np.abs(predictions - labels) / (labels + 1.0)) * 100.0
+    rmse = np.sqrt(np.mean((predictions - labels) ** 2))
+    evaluater = mape+50*rmse
     return {
         'mae': float(mae),
-        'mape': float(mape)
+        'mape': float(mape),
+        'rmse': float(rmse),
+        'evaluater': float(evaluater)
     }
 
 import torch.nn as nn
@@ -52,7 +56,7 @@ class DMVSTLoss(nn.Module):
 
     def forward(self, y_pred, y_true):
         diff = y_true - y_pred
-        abs_diff = torch.abs(diff)
+        abs_diff = diff ** 2
         loss = abs_diff / (1.0 + y_true) + self.lambda_rel * abs_diff
         if self.reduction == "sum":
             loss = loss.sum()
@@ -96,7 +100,7 @@ def run(config):
 
     ir_module = IRModule(dataset, device, k=config.model.IRModule.k)
     model = IRVSTNet(ir_module=ir_module, **config.model['IRVSTNet'])
-    trainer_model = ModelTrainer(model, loss=DMVSTLoss()).to(device)
+    trainer_model = ModelTrainer(model, loss=DMVSTLoss(lambda_rel=1)).to(device)
 
     args = TrainingArguments(
         **config['train'],

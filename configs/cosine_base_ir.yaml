@@ -35,7 +35,7 @@ train:
   logging_steps: 500
   eval_strategy: epoch
   load_best_model_at_end: true
-  metric_for_best_model: mape
+  metric_for_best_model: rmse
   greater_is_better: false
 
 hydra:

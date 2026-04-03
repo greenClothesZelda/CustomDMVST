@@ -199,6 +199,7 @@ class ModelTrainer(nn.Module):
         super().__init__()
         self.model = model
         self.loss_fn = kwargs.get('loss', nn.L1Loss())
+        self.relu = nn.ReLU()
 
     def forward(self, demands_series, weather, time, sample_idx, labels=None, return_dict=True, **kwargs):
         predictions = self.model(demands_series, weather, time, sample_idx)
@@ -207,6 +208,7 @@ class ModelTrainer(nn.Module):
         if labels is not None:
             loss = self.loss_fn(predictions, labels.to(torch.float32))
         if return_dict:
+            predictions = self.relu(predictions)
             return {
                 'predictions': predictions,
                 'loss': loss
