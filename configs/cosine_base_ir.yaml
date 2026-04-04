@@ -1,25 +1,26 @@
 project_name: cosine_base_ir
 seed: 42
 device: cuda
+
 dataset:
   root: data/raw
-  time_step: 24
-  num_nodes: 35
   size: 7000
 
 split:
   train_ratio: 0.8
 
 model:
-  IRVSTNet:
-    embedding_dim: 32
-    lstm:
-      hidden_size: 32
-      num_layers: 3
-      dropout: 0.1
-      nhead: 4
-  IRModule:
-    k: 20
+  STResNet:
+    nb_flow: 1
+    len_c: 3
+    len_p: 1
+    len_t: 1
+    period_interval: 24
+    trend_interval: 168
+    nb_filter: 64
+    nb_residual_unit: 12
+    use_external: true
+    external_hidden: 64
 
 train:
   per_device_train_batch_size: 32

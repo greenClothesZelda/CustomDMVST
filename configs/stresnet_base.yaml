@@ -1,4 +1,4 @@
-project_name: stresnet_default
+project_name: stresnet_base
 seed: 42
 device: cuda
 
@@ -23,8 +23,8 @@ model:
     external_hidden: 64
 
 train:
-  per_device_train_batch_size: 32
-  per_device_eval_batch_size: 128
+  per_device_train_batch_size: 128
+  per_device_eval_batch_size: 1280
   num_train_epochs: 60
   remove_unused_columns: false
   save_strategy: epoch
@@ -36,7 +36,7 @@ train:
   logging_steps: 500
   eval_strategy: epoch
   load_best_model_at_end: true
-  metric_for_best_model: rmse
+  metric_for_best_model: evaluater
   greater_is_better: false
 
 hydra:

@@ -4,11 +4,13 @@ from pathlib import Path
 import hydra
 import numpy as np
 import torch
+import torch.nn as nn
 from hydra.core.hydra_config import HydraConfig
 from torch.utils.data import Subset
 from transformers import Trainer, TrainingArguments
 
-from models.GNVSTNet import IRModule, IRVSTNet, ModelTrainer, collate_fn
+from models.GNVSTNet import ModelTrainer, collate_fn
+from models.STResNet import STResNet
 from models.loader.DemandDataset import MyDataset
 from runners.test import test_loop
 
@@ -47,7 +49,7 @@ def compute_metrics(eval_pred):
         'evaluater': float(evaluater)
     }
 
-import torch.nn as nn
+
 class DMVSTLoss(nn.Module):
     def __init__(self, lambda_rel=1.0, reduction="mean"):
         super().__init__()
@@ -55,6 +57,8 @@ class DMVSTLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, y_pred, y_true):
+        y_pred = y_pred.to(torch.float32)
+        y_true = y_true.to(torch.float32)
         diff = y_true - y_pred
         abs_diff = diff ** 2
         loss = abs_diff / (1.0 + y_true) + self.lambda_rel * abs_diff
@@ -73,33 +77,42 @@ def run(config):
 
     dataset = MyDataset(
         root=Path(config.dataset.root),
-        time_step=config.dataset.time_step,
-        num_nodes=config.dataset.num_nodes,
-        size=config.dataset.size
+        size=config.dataset.size,
+        train_ratio=config.split.train_ratio,
+        len_c=config.model.STResNet.len_c,
+        len_p=config.model.STResNet.len_p,
+        len_t=config.model.STResNet.len_t,
+        period_interval=config.model.STResNet.period_interval,
+        trend_interval=config.model.STResNet.trend_interval,
     )
     len_dataset = len(dataset)
     train_end = int(len_dataset * config.split.train_ratio)
-    warmup = config.model.IRModule.k
 
-    if train_end <= warmup:
-        raise ValueError(f"train_end ({train_end}) must be greater than warmup ({warmup}).")
+    if train_end <= 0:
+        raise ValueError(f"train_end ({train_end}) must be greater than 0.")
     if train_end >= len_dataset:
         raise ValueError(f"train_end ({train_end}) must be smaller than dataset length ({len_dataset}).")
 
-    train_indices = list(range(warmup, train_end))
+    train_indices = list(range(0, train_end))
     test_indices = list(range(train_end, len_dataset))
 
     train_dataset = Subset(dataset, train_indices)
     test_dataset = Subset(dataset, test_indices)
     log.info(
-        "Dataset sizes - RetrievalOnly: %s, Train: %s, Test: %s",
-        warmup,
+        "Dataset sizes - Train: %s, Test: %s, BaseOffset: %s, Grid: %sx%s",
         len(train_dataset),
-        len(test_dataset)
+        len(test_dataset),
+        dataset.base_offset,
+        dataset.grid_H,
+        dataset.grid_W,
     )
 
-    ir_module = IRModule(dataset, device, k=config.model.IRModule.k)
-    model = IRVSTNet(ir_module=ir_module, **config.model['IRVSTNet'])
+    model = STResNet(
+        H=dataset.grid_H,
+        W=dataset.grid_W,
+        external_dim=dataset.weather_list.shape[1] + dataset.time.shape[1],
+        **config.model['STResNet'],
+    )
     trainer_model = ModelTrainer(model, loss=DMVSTLoss(lambda_rel=1)).to(device)
 
     args = TrainingArguments(

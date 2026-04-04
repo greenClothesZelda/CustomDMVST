@@ -1,69 +1,135 @@
-import torch
-import pandas as pd
-import numpy as np
 import logging
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
 
 log = logging.getLogger(__name__)
 
 
-
 class MyDataset(torch.utils.data.Dataset):
-    def __init__(self, root, time_step, size, num_nodes, target_columns=['강수량(mm)', '기온(°C)', '습도(%)', '적설(cm)']):
-        super(MyDataset, self).__init__()
+    def __init__(
+        self,
+        root,
+        size,
+        train_ratio,
+        len_c,
+        len_p,
+        len_t,
+        period_interval,
+        trend_interval,
+        target_columns=None,
+    ):
+        super().__init__()
+        self.root = root
+        self.len_c = len_c
+        self.len_p = len_p
+        self.len_t = len_t
+        self.period_interval = period_interval
+        self.trend_interval = trend_interval
+        self.base_offset = max(
+            self.len_c,
+            self.len_p * self.period_interval,
+            self.len_t * self.trend_interval,
+        )
 
-        df = pd.read_csv(root/'meteorological_data.csv', encoding='cp949')
-        df_filled = df.fillna(0)
-        target_columns = target_columns
-        #     # "풍속(m/s)",
-        #     "강수량(mm)",
-        #     "기온(°C)",
-        #     "습도(%)",
-        #     # "일조(hr)",
-        #     "적설(cm)",
-        #     # "전운량(10분위)",
-        #     # "현지기압(hPa)"
-        weather = df_filled[target_columns].values
-        self.weather_list = torch.tensor(weather, dtype=torch.float)
-        self.time = torch.eye(7).unsqueeze(1).unsqueeze(0) # (1, 7, 1, 7)
-        self.time = self.time.repeat(weather.shape[0]//(7*24), 1, 24, 1).view(-1,7)  # (num_samples, 7)
+        if target_columns is None:
+            target_columns = ["강수량(mm)", "기온(°C)", "습도(%)", "적설(cm)"]
 
-        time = torch.arange(0, 24).unsqueeze(1).repeat(self.time.shape[0]//24, 1).view(-1,1) / 24.0  # (num_samples, 1)
-        self.time = torch.cat([self.time, time], dim=1)  # (num_samples, 8)
-        grid = np.load(root/f'grid({size}).npy')
-        self.origin_demand_arr = torch.from_numpy(grid).to(torch.long)
-        self.origin_demand_arr = self.origin_demand_arr.reshape(self.origin_demand_arr.shape[0], -1) # (T, num_nodes)
+        weather_df = pd.read_csv(root / "meteorological_data.csv", encoding="cp949").fillna(0)
+        timestamps = pd.to_datetime(weather_df["일시"])
+        weekday = torch.tensor(timestamps.dt.dayofweek.to_numpy(), dtype=torch.long)
+        weekday_one_hot = F.one_hot(weekday, num_classes=7).to(torch.float32)
+        hour_feature = torch.tensor(
+            timestamps.dt.hour.to_numpy(),
+            dtype=torch.float32,
+        ).unsqueeze(1) / 24.0
+        self.time = torch.cat([weekday_one_hot, hour_feature], dim=1)
+
+        raw_weather = torch.tensor(
+            weather_df[target_columns].to_numpy(),
+            dtype=torch.float32,
+        )
+
+        grid = np.load(root / f"grid({size}).npy")
+        if grid.ndim == 4 and grid.shape[1] == 1:
+            grid = grid[:, 0]
+        if grid.ndim != 3:
+            raise ValueError(f"Expected grid(shape) to be (T, H, W), got {grid.shape}.")
+
+        self.grid = torch.from_numpy(grid).to(torch.long)
+        self.num_timesteps, self.grid_H, self.grid_W = self.grid.shape
+
+        if raw_weather.shape[0] != self.num_timesteps:
+            raise ValueError(
+                "meteorological_data.csv and grid timeline length must match: "
+                f"{raw_weather.shape[0]} vs {self.num_timesteps}"
+            )
+
+        self.origin_demand_arr = self.grid.reshape(self.num_timesteps, -1)
         self.total_num_points = self.origin_demand_arr.shape[1]
+        self.num_nodes = self.total_num_points
+        self.retained_flat_indices = torch.arange(self.total_num_points, dtype=torch.long)
+        self.max_demand = int(self.origin_demand_arr.max().item())
 
-        
-        self.num_nodes = num_nodes
-        
-        top_k_nodes = torch.topk(self.origin_demand_arr.sum(dim=0), self.num_nodes).indices
-        self.retained_flat_indices = top_k_nodes.clone()
-        self.demand_arr = self.origin_demand_arr[:, top_k_nodes] # (T, num_nodes)
-        
-        self.time_step = time_step
-        self.max_demand = int(torch.max(self.demand_arr).item())
+        self.num_samples = self.num_timesteps - self.base_offset
+        if self.num_samples <= 0:
+            raise ValueError(
+                f"Not enough timesteps ({self.num_timesteps}) for base_offset ({self.base_offset})."
+            )
 
-        self.dropped_points = self.origin_demand_arr.sum().item() - self.demand_arr.sum().item()
-        log.info(f"Dataset initialized: Total Points={self.origin_demand_arr.sum().item()}, Retained Points={self.demand_arr.sum().item()}, Dropped Points={self.dropped_points}, demand coverage={100 * self.demand_arr.sum().item() / self.origin_demand_arr.sum().item():.2f}%")
+        train_sample_count = int(self.num_samples * train_ratio)
+        if train_sample_count <= 0:
+            raise ValueError("train_ratio is too small for the available dataset length.")
+
+        train_target_end = self.base_offset + train_sample_count
+        weather_train = raw_weather[self.base_offset:train_target_end]
+        weather_mean = weather_train.mean(dim=0)
+        weather_std = weather_train.std(dim=0, unbiased=False).clamp_min(1e-6)
+        self.weather_mean = weather_mean
+        self.weather_std = weather_std
+        self.weather_list = (raw_weather - weather_mean) / weather_std
+
+        log.info(
+            "Dataset initialized: grid=%s, total_points=%s, base_offset=%s, samples=%s, "
+            "weather_dim=%s",
+            tuple(self.grid.shape),
+            self.total_num_points,
+            self.base_offset,
+            self.num_samples,
+            self.weather_list.shape[1],
+        )
 
     def __getitem__(self, index):
+        target_idx = index + self.base_offset
+        frames = []
+
+        for step in range(1, self.len_c + 1):
+            frames.append(self.grid[target_idx - step])
+        for step in range(1, self.len_p + 1):
+            frames.append(self.grid[target_idx - step * self.period_interval])
+        for step in range(1, self.len_t + 1):
+            frames.append(self.grid[target_idx - step * self.trend_interval])
+
+        demands_series = torch.stack(frames, dim=0)
+
         return {
-            'demands_series': self.demand_arr[index:index + self.time_step].transpose(0, 1),  # (N, T)
-            'labels': self.demand_arr[index + self.time_step],
-            'time': self.time[index + self.time_step],
-            'weather': self.weather_list[index + self.time_step],
-            'sample_idx': torch.tensor(index, dtype=torch.long)
+            "demands_series": demands_series,
+            "labels": self.origin_demand_arr[target_idx],
+            "time": self.time[target_idx],
+            "weather": self.weather_list[target_idx],
+            "sample_idx": torch.tensor(index, dtype=torch.long),
         }
 
     def __len__(self):
-        return self.demand_arr.shape[0] - self.time_step
+        return self.num_samples
 
     def get_full_label(self, sample_idx):
-        label_index = int(sample_idx) + self.time_step
-        return self.origin_demand_arr[label_index]
+        target_idx = int(sample_idx) + self.base_offset
+        return self.origin_demand_arr[target_idx]
 
     def get_full_labels(self, sample_indices):
         sample_indices = torch.as_tensor(sample_indices, dtype=torch.long)
-        label_indices = sample_indices + self.time_step
-        return self.origin_demand_arr[label_indices]
+        target_indices = sample_indices + self.base_offset
+        return self.origin_demand_arr[target_indices]

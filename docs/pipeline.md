@@ -2,142 +2,113 @@
 
 ## 개요
 
-이 브랜치의 모델은 두 경로를 섞습니다.
+현재 파이프라인은 ST-ResNet 단일 경로로 동작합니다.
 
-1. `IRModule`
-   각 sample보다 이전 시점의 `(N, T)` demand window 전체를 검색해 cosine similarity 기반 retrieval prediction을 만듭니다.
-2. `IRVSTNet`
-   demand, node id, weather, time을 임베딩하고 spatial attention + temporal BiLSTM으로 neural prediction을 만듭니다.
+1. `MyDataset`
+   각 target 시점 `t`에 대해 closeness, period, trend keyframe을 모아 `(L_total, H, W)` 입력을 만듭니다.
+2. `STResNet`
+   세 branch의 residual CNN 출력을 parametric fusion으로 합치고, weather/time external feature를 map으로 투영해 더합니다.
+3. `ModelTrainer`
+   Hugging Face `Trainer`와 맞추기 위해 `loss`와 `predictions`를 dict로 반환합니다.
 
-최종 출력은 두 prediction을 gate로 섞은 `(B, N)` 다음 시점 수요 예측입니다.
+최종 출력은 `(B, 169)` shape의 다음 시점 full-grid 수요 예측입니다.
 
 ## 데이터 흐름
 
 ### 1. Dataset
 
-`MyDataset`은 sample index `i`에 대해 다음 값을 반환합니다.
+실데이터 기준:
 
-- `demands_series`: `demand_arr[i : i + time_step]`를 `(N, T)`로 전치한 값
-- `labels`: `demand_arr[i + time_step]`, shape `(N,)`
-- `time`: 다음 시점의 시간 feature, shape `(8,)`
-- `weather`: 다음 시점의 기상 feature, shape `(F,)`
-- `sample_idx`: 현재 sample의 절대 dataset index, scalar
+- `grid(7000).npy`: `(4368, 13, 13)`
+- `meteorological_data.csv`: 4368행 hourly weather row
 
-`sample_idx`는 retriever가 검색 가능한 prefix를 `0..sample_idx-1`로 제한하는 데 사용합니다.
+`MyDataset`은 sample index `i`에 대해 `target_idx = i + base_offset`를 잡고 다음을 반환합니다.
 
-### 2. Split
+- `demands_series`: `(L_total, 13, 13)`
+- `labels`: `origin_demand_arr[target_idx]`, shape `(169,)`
+- `time`: target 시점의 시간 feature, shape `(8,)`
+- `weather`: target 시점의 정규화된 기상 feature, shape `(4,)`
+- `sample_idx`: dataset-local index, scalar
 
-`main.py`는 full timeline 기준으로 다음처럼 나눕니다.
+frame 순서는 아래와 같습니다.
 
-- `warmup = model.IRModule.k`
+1. closeness: `t-1, t-2, ..., t-len_c`
+2. period: `t-period_interval, t-2*period_interval, ...`
+3. trend: `t-trend_interval, t-2*trend_interval, ...`
+
+### 2. Base Offset
+
+`base_offset`은 keyframe이 모두 존재하도록 하는 최소 시작점입니다.
+
+```text
+base_offset = max(len_c, len_p * period_interval, len_t * trend_interval)
+```
+
+현재 기본 설정에서는:
+
+- `len_c = 3`
+- `len_p = 1`
+- `len_t = 1`
+- `period_interval = 24`
+- `trend_interval = 168`
+
+이므로 `base_offset = 168`입니다.
+
+### 3. Split
+
+`main.py`는 `len(dataset)`가 이미 `base_offset`을 반영한 상태라고 가정하고 단순 split을 적용합니다.
+
 - `train_end = int(len(dataset) * split.train_ratio)`
-- retrieval-only prefix: `[0, warmup)`
-- train: `[warmup, train_end)`
+- train: `[0, train_end)`
 - test: `[train_end, len(dataset))`
 
-즉 초반 `warmup` 구간은 학습에는 들어가지 않고 검색 candidate로만 남습니다.
+weather normalization도 같은 train split 기준 통계로 계산됩니다.
 
-### 3. Retrieval
+## 모델 구조
 
-`IRModule`은 full dataset 전체로 아래 DB를 만듭니다.
-
-- `db_keys`: shape `(N, Samples, T)`
-- `db_values`: shape `(N, Samples, 1)`
-- `db_norms`: cosine normalization용 norm
-
-query batch가 들어오면 batch 내부 각 sample마다 개별적으로 다음을 수행합니다.
-
-1. `candidate_count = sample_idx`
-2. prefix candidate를 `db[:, :candidate_count]`로 자름
-3. 각 node에 대해 cosine similarity 계산
-4. `top_k = min(k, candidate_count)` 적용
-5. top-k label을 softmax weight로 가중합
-
-retrieval output shape은 `(B, N)`입니다.
-
-### 4. Neural Forecasting
-
-`IRVSTNet`은 다음 feature를 더해 `(B, N, T, D)`를 만듭니다.
-
-- demand embedding
-- node embedding
-- weather embedding
-- time embedding
-
-그 후:
-
-1. 각 time slice에서 node 간 self-attention
-2. 각 node별 temporal BiLSTM
-3. linear projection으로 neural output `(B, N)` 생성
-
-### 5. Fusion
-
-`lambda_layer`가 node별 gate를 예측합니다.
-
-- neural output: `out`
-- retrieval output: `ir_out`
-- final output: `lambda * out + (1 - lambda) * ir_out`
-
-## 주요 모듈 설명
-
-### `IRModule`
-
-역할:
-
-- causal retrieval
-- query보다 이전 시간만 검색
-- raw demand cosine similarity 사용
+### `STResNet`
 
 입력:
 
-- `query_demands`: `(B, N, T)`
-- `sample_idx`: `(B,)`
-
-출력:
-
-- `aggregated`: `(B, N)`
-- `retrieved_indices`: `(B, N, k)`
-
-`retrieved_indices`는 absolute dataset index가 아니라 prefix 내부 index입니다. 현재 구현에서는 항상 현재 `sample_idx`보다 작은 위치만 반환됩니다.
-
-### `IRVSTNet`
-
-역할:
-
-- retrieval branch와 neural branch를 합친 forecasting model
-
-입력:
-
-- `demands_series`: `(B, N, T)`
-- `weather`: `(B, F)`
+- `demands_series`: `(B, L_total, 13, 13)`
+- `weather`: `(B, 4)`
 - `time`: `(B, 8)`
-- `sample_idx`: `(B,)`
+- `sample_idx`: `(B,)`, 현재 미사용
 
-출력:
+구성:
 
-- next-step demand prediction `(B, N)`
+1. closeness branch
+2. period branch
+3. trend branch
+4. parametric fusion weight `Wc`, `Wp`, `Wt`
+5. external FC
+
+각 branch는 다음 순서를 따릅니다.
+
+1. `Conv2d`
+2. residual unit stack
+3. `Conv2d`
+
+fusion 결과에 external map을 더한 뒤 `(B, 1, 13, 13)`을 flatten해서 `(B, 169)`를 반환합니다.
 
 ### `ModelTrainer`
 
 역할:
 
-- Hugging Face `Trainer`와 맞추기 위한 wrapper
-- `L1Loss`로 training loss 계산
+- `DMVSTLoss` 계산
+- 반환용 `predictions`에만 `ReLU` 적용
+- `Trainer`가 읽을 수 있는 `{'predictions': ..., 'loss': ...}` dict 생성
+
+loss는 raw output 기준으로 계산하고, 평가/저장용 prediction은 비음수로 정리합니다.
 
 ## 설정 인자 설명
 
-기준 파일은 `configs/cosine_base_ir.yaml`입니다.
+기준 파일은 `configs/stresnet_base.yaml`입니다.
 
 ### `dataset`
 
 `root`
 : 원시 데이터 경로
-
-`time_step`
-: 입력 시계열 길이 `T`
-
-`num_nodes`
-: 총 demand 기준 상위 몇 개 grid cell을 사용할지
 
 `size`
 : 불러올 `grid(size).npy`의 size 값
@@ -145,29 +116,39 @@ retrieval output shape은 `(B, N)`입니다.
 ### `split`
 
 `train_ratio`
-: full timeline 기준 train 종료 비율
+: `base_offset`이 반영된 dataset length 기준 train 종료 비율
 
-### `model.IRModule`
+### `model.STResNet`
 
-`k`
-: retrieval top-k 크기입니다. 동시에 warmup prefix 길이도 이 값으로 사용됩니다.
+`nb_flow`
+: 현재 구현은 `1`만 지원합니다.
 
-### `model.IRVSTNet`
+`len_c`
+: closeness frame 수
 
-`embedding_dim`
-: demand/node/weather/time 공통 embedding 차원
+`len_p`
+: period frame 수
 
-`lstm.hidden_size`
-: bidirectional LSTM의 hidden size
+`len_t`
+: trend frame 수
 
-`lstm.num_layers`
-: LSTM layer 수
+`period_interval`
+: period 간격
 
-`lstm.dropout`
-: LSTM/attention dropout
+`trend_interval`
+: trend 간격
 
-`lstm.nhead`
-: spatial attention의 head 수
+`nb_filter`
+: branch 내부 convolution 채널 수
+
+`nb_residual_unit`
+: branch별 residual unit 수
+
+`use_external`
+: weather/time external component 사용 여부
+
+`external_hidden`
+: external FC hidden 차원
 
 ### `train`
 
@@ -202,24 +183,30 @@ retrieval output shape은 `(B, N)`입니다.
 : best eval checkpoint를 마지막에 다시 로드할지
 
 `metric_for_best_model`
-: best checkpoint를 고를 metric입니다. 현재는 `mape`를 사용합니다.
+: best checkpoint를 고를 metric입니다. 기본값은 `rmse`입니다.
 
 `greater_is_better`
-: `mape`는 낮을수록 좋기 때문에 `false`를 사용합니다.
+: `rmse`는 낮을수록 좋기 때문에 `false`를 사용합니다.
+
+## 평가와 결과 파일
+
+`runners/test.py`는 full-grid prediction과 label을 직접 비교합니다.
+
+- `MAE`
+- `RMSE`
+- `MAPE`
+
+산출물:
+
+- `test_results.csv`
+- `demand_error_analysis.png`
+- `predictions_max_demand_node.png`
+- `predictions_min_demand_node.png`
+- `predictions_mid_demand_node.png`
 
 ## 실행 체크리스트
 
-학습 전에 최소한 다음을 확인하면 됩니다.
-
 - `grid(size).npy`와 `meteorological_data.csv`가 `dataset.root` 아래에 있는지
-- `model.IRModule.k < len(dataset) * split.train_ratio`인지
-- GPU를 쓰면 `device=cuda`, CPU를 쓰면 `device=cpu`와 `+train.use_cpu=true`를 같이 주는지
 - `remove_unused_columns=false`가 유지되는지
-
-## 결과 파일
-
-학습이 끝나면 Hydra output dir 아래에 다음이 생성됩니다.
-
-- Trainer checkpoint
-- `test_results.csv`
-- 로그 및 설정 스냅샷
+- CPU 실행 시 `device=cpu`와 `+train.use_cpu=true`를 같이 주는지
+- 출력 경로가 현재 환경에서 writable 한지, 아니면 `hydra.run.dir=/tmp/...`로 override할지
